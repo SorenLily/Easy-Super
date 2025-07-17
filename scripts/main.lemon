@@ -1,0 +1,1009 @@
+// Settings
+global u8 ring_req_super.setting
+global u8 ring_req_hyper.setting
+global u8 ring_drain_super
+global u8 ring_drain_hyper
+global u8 progressive_forms
+global u8 super_ring_magnet
+global u8 ddz_form // 0 -> Super, 1 -> Hyper
+global u8 always_super // 0 -> Off, 1 -> Always Super, 2 -> Always Hyper
+
+// State for switching to the character's super palette at the start of a stage.
+global u8 initialize_palette
+// Flag denoting the player is transforming from Super to Hyper.
+global bool super_to_hyper
+// Enables changes to palette logic when going from Super to Hyper or vice versa.
+global u8 palette_fixes
+// State that manages holding Y to transform twice in midair. Also doubles as a timer when its value is >= 2.
+global u8 continue_transformation
+// State for removing Super form speed bonuses during cutscenes.
+global u8 cutscene_speedcap
+// Counter for adjusting the positions of the super flickies on initialization.
+global u8 adjust_flickies
+// Indicates the palette is fading towards white or towards black.
+global bool fade_bright
+global bool fade_dark
+// Used to calculate the above.
+global u16 black_reference.prev
+global u16 white_reference.prev
+
+define u16 char.black = u16[0xfffffc00]
+define u16 char.white = u16[0xfffffc02]
+
+// Helper function
+function u32 superAddress()
+{
+	// Returns either the address of super.active or super.active.tails depending on the character.
+	return (u8[A0 + 0x38] == 1 ? 0xfffff667 : 0xfffffe19)
+}
+
+/////////////////////////////
+///	   INITIALIZATION	  ///
+/////////////////////////////
+
+function void Character.Initialization.shared(u8 character)
+{
+	initialize_palette = 0
+	palette_fixes = 0
+	continue_transformation = 0
+	cutscene_speedcap = 0
+	adjust_flickies = 0
+	base.Character.Initialization.shared(character)
+	if (isMainCharacter(character) && always_super && !isSonicIntro() && global.zone != 0x0c && global.zone != 0x0d)
+	{
+		initSuperForm(character)
+	}
+}
+
+// Helper function
+function void initSuperForm(u8 character)
+{
+	u32 a0_temp = A0
+	A0 = 0xffffb000
+	u32 speedcap_address = 0xfffff760
+	// This is the "default" state of the Super/Hyper palette.
+	super.palettefx.state = 0xff
+	// Gain Invincibility.
+	char.bonus_effect |= char.bonus.INVINCIBLE
+	if (character != CHARACTER_TAILS)
+	{
+		if (always_super == 1)
+		{
+			super.active = 1
+			// Initialize Super Sonic stars
+			u32[0xffffcbc0] = 0x019156
+		}
+		else
+		{
+			super.active = 0xff
+			u32[0xffffcbc0] = addressof(AfterImages.Init)
+			if (character == CHARACTER_SONIC)
+				// Initialize Hyper Sonic Stars
+				u32[0xffffcd7c] = 0x019348
+		}
+	}
+	else
+	{
+		// Tails has separate variables and no stars.
+		if (always_super == 1)
+		{
+			super.active.tails = 1
+		}
+		else
+		{
+			super.active.tails = 0xff
+			// Call the flicky army of death.
+			u32[0xffffcd7c] = 0x01a170
+			adjust_flickies = 4
+		}
+		speedcap_address = 0xfffffec0
+	}
+	// Apply the Super form's speed bonuses.
+	setSpeedCapProperties(speedcap_address)
+	A0 = a0_temp
+	initialize_palette = 2
+}
+
+//# address-hook(0x01a19c) end(0x01a1ee)
+function void fn01a19c()
+{
+	base.fn01a19c()
+	if (adjust_flickies && (kosinski.waiting_modules == 0))
+	{
+		objA0.position.x.u16 = u16[0xffffb000 + 0x10]
+		objA0.position.y.u16 = u16[0xffffb000 + 0x14] - 0x10
+		adjust_flickies--
+	}
+}
+
+function void updateGameObjectLoop()
+{
+	base.updateGameObjectLoop()
+	// At the start of a stage, there's a few frames where the general palette update code is not run.
+	// This means that even if the player is in the Super form, the Super Palette will not show during this window.
+	// So we have to force the super palette update.
+	if (initialize_palette)
+	{
+		// This is true while a stage is fading in (before the player has control).
+		if (global.fade_timer)
+		{
+			// Run the super palette update every frame using these values.
+			super.palettefx.frame = 0x2a
+			super.palettefx.timer = 0
+			UpdatePaletteEffects.SuperForm()
+		}
+		else
+		{
+			initialize_palette--
+		}
+	}
+}
+
+/////////////////////////////
+///		GENERAL LOGIC	  ///
+/////////////////////////////
+
+//# address-hook(0x011b26) end(0x011bdc)
+function void Character.UpdateRingsInSuperForm()
+{
+	u8 super_state = u8[superAddress()]
+	// This function is responsible not only for ring drain, but also cancelling the super form at the end of an act.
+	// If we want to maintain the Super Form between acts, it needs to be supressed.
+	if (((always_super == 1 && super_state == 1) || (always_super == 2)) && global.zone != 0x0d)
+		return
+
+	// Get the appropriate ring drain; 60 is the normal value (1 per second).
+	u8 ring_drain = 60
+	if (super_state == 1)
+		ring_drain = ring_drain_super
+	if (super_state & 0x80)
+		ring_drain = ring_drain_hyper
+
+	// Don't apply increased ring drain in DDZ, or else the zone becomes impossible.
+	if (global.zone == 0x0c)
+		ring_drain = max(ring_drain, 60)
+
+	// "None" setting for ring drain
+	if (ring_drain > 120)
+	{
+		// Just keep the timer at a high value forever.
+		super.ring_dec.frames = 60
+		base.Character.UpdateRingsInSuperForm()
+		return
+	}
+
+	bool change_timer = super.ring_dec.frames == 0
+	base.Character.UpdateRingsInSuperForm()
+
+	// When a ring is consumed and the timer is reset to 60, change it to our setting.
+	if (ring_drain != 60 && super.ring_dec.frames == 60 && change_timer)
+		super.ring_dec.frames = ring_drain
+}
+
+function bool Character.performSuperTransformation()
+{
+	// Tails as player 2 can't go Super.
+	if (char.character == CHARACTER_TAILS && !isMainCharacter(CHARACTER_TAILS))
+		return base.Character.performSuperTransformation()
+
+	bool result = false
+	u16 rings_temp = ring_counter
+	// I intentionally wrote the ring requirement values backwards in the mod.json file so that they display in descending order.
+	// Here we convert to the actual value.
+	u8 ring_req_super = 100 - ring_req_super.setting
+	u8 ring_req_hyper = 100 - ring_req_hyper.setting
+	u8 target_form = 0
+	if (global.super_emeralds >= 7)
+	{
+		if ((!progressive_forms && !u8[superAddress()]) || (super_to_hyper))
+			target_form = 2
+		else if (progressive_forms && u8[superAddress()] == 0)
+			target_form = 1
+	}
+	else if (global.chaos_emeralds >= 7 && global.traded_emeralds == 0 && !u8[superAddress()])
+	{
+		target_form = 1
+	}
+	else
+	{
+		// We don't meet the requirements to go to any super form, so exit.
+		return base.Character.performSuperTransformation()
+	}
+
+	// Enforce ring requirement settings.
+	if (target_form == 1 && (ring_counter >= ring_req_super))
+		ring_counter = 50
+	else if (target_form == 2 && (ring_counter >= ring_req_hyper))
+		ring_counter = 50
+	else
+	{
+		// We do not have enough rings to go super/hyper.
+		ring_counter = 0
+		result = base.Character.performSuperTransformation()
+		ring_counter = rings_temp
+		return result
+	}
+
+	u8 chaos_emeralds_temp = global.chaos_emeralds
+	u8 traded_emeralds_temp = global.traded_emeralds
+	u8 super_emeralds_temp = global.super_emeralds
+
+	// If we are going to Super instead of to Hyper...
+	if (global.super_emeralds >= 7 && target_form == 1)
+	{
+		// Modify values to force Character.performSuperTransformation() to send us to Super form.
+		global.chaos_emeralds = 7
+		global.traded_emeralds = 0
+		global.super_emeralds = 0
+		// Enables the player to keep holding Y to transform again to Hyper (after a bit of time)
+		continue_transformation = 1
+	}
+	// If we are going from Super to Hyper...
+	else if (super_to_hyper)
+	{
+		// Modify values to force Character.performSuperTransformation() to send us to Hyper form.
+		u8[superAddress()] = 0
+		// Need to apply palette fixes.
+		palette_fixes = 1
+	}
+
+	result = base.Character.performSuperTransformation()
+
+	if (result) // Need to initialize the ring drain timer to our setting.
+		super.ring_dec.frames = (u8[superAddress()] == 1) ? ring_drain_super : ring_drain_hyper
+
+	// Reset variables.
+	global.super_emeralds = super_emeralds_temp
+	global.traded_emeralds = traded_emeralds_temp
+	global.chaos_emeralds = chaos_emeralds_temp
+	ring_counter = rings_temp
+
+	return result
+}
+
+function void Character.cancelSuperTransformation()
+{
+	if (always_super && global.zone != 0x0d)
+	{
+		// If we're in Hyper form and Hyper is not our base form...
+		if ((u8[superAddress()] & 0x80) && always_super != 2)
+		{
+			// Need to go from Hyper form to Super form.
+			// The base function does a lot of things that we don't want in this situation, and technically we never stop being Super here.
+			// So it's better to just do the things we need manually and not call the base.
+			u8[superAddress()] = 1
+			// This is the "fade out" palette state.
+			super.palettefx.state = 2
+			super.palettefx.frame = 30
+			// Need to apply palette fixes.
+			palette_fixes = 1
+
+			// Apparently these 2 checks are useful. I just kept them from the base function.
+			if (char.state == char.state.TRANSFORMING && (char.control_flags & (control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE)) == (control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE))
+				char.control_flags &= ~(control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE)
+
+			if (char.character == CHARACTER_KNUCKLES && char.state == char.state.KNUX_FLYCLIMB)
+				char.state.former = char.state.KNUX_FLYCLIMB
+			
+			if (char.character != CHARACTER_TAILS)
+			{
+				// Initialize Super Stars
+				u32[0xffffcbc0] = 0x019156
+			}
+		}
+		// The Super form cannot be cancelled with this setting on.
+		return
+	}
+	base.Character.cancelSuperTransformation()
+}
+
+function void Character.updateJumpMoves()
+{
+	u8 super_temp = u8[superAddress()]
+	// This is the check to initialize transforming again to Hyper after already transforming to Super and holding Y.
+	if (continue_transformation >= 12)
+	{
+		// We're already Super, so set this flag to enable going Hyper.
+		super_to_hyper = true
+		bool result = Character.performSuperTransformation()
+		// Rewind the Transforming animation a bit to make it last longer.
+		char.animation.frame = 0x5
+		continue_transformation = 0
+		if (result)
+		{
+			// There's little point in trying to run the base function here. It won't do anything useful and would normally
+			// return after calling Character.performSuperTransformation anyway().
+			return
+		}
+		else
+		{
+			// If we didn't go Hyper after all, then restore the super state and proceed as normal.
+			u8[superAddress()] = super_temp
+			base.Character.updateJumpMoves()
+			return
+		}
+	}
+
+	// If the "Go Super then Hyper" setting is on and we're in Super form and we're eligible to go Hyper and we have the correct state and button pressed...
+	if (progressive_forms && super_temp == 1 && ring_counter >= (100 - ring_req_hyper.setting) && global.super_emeralds >= 7 && char.jumping && char.double_jump_state == 0 && Input.buttonPressed(BUTTON_Y) && char.invuln.countdown == 0)
+	{
+		// Super state has to be modified here so that Character.performSuperTransformation() gets reached.
+		u8[superAddress()] = 0
+		super_to_hyper = true
+	}
+	base.Character.updateJumpMoves()
+	super_to_hyper = false
+	// If the super value was modified but we did not enter a super form...
+	if (u8[superAddress()] == 0 && super_temp != 0)
+	{
+		// Reset Super value.
+		u8[superAddress()] = super_temp
+	}
+}
+
+// Helper function
+function void handleContinuedTransformation(bool fade_out_finished)
+{
+	// This function manages the state for transforming to Super and then holding Y to continue to transform to Hyper.
+	// This mostly involves managing continue_transformation, but also the character's control_flags.
+
+	// The player must hold Y to continue the transformation all the way to Hyper.
+	if (continue_transformation && !Input.buttonDown(BUTTON_Y))
+	{
+		// Reset the state.
+		if (continue_transformation >= 2)
+		{
+			// Restore player control.
+			u8[0xffffb02e] &= ~(control_flag.DISABLE_UPDATE | control_flag.DISABLE_INTERACTION)
+		}
+		continue_transformation = 0
+	}
+
+	// Tails and Knuckles have a shorter transformation cycle than Sonic, so we have to delay their second transformation.
+	// continue_transformation functions like a timer for values between 2 and 12. When it reaches 12, the player can go Hyper.
+
+	// Waiting to transform again to Hyper.
+	if (continue_transformation >= 2)
+	{
+		continue_transformation++
+		// Restore player control once we're ready to transform the second time.
+		if (continue_transformation == 12)
+			u8[0xffffb02e] &= ~(control_flag.DISABLE_UPDATE | control_flag.DISABLE_INTERACTION)
+	}
+
+	// If this is true, the Super transformation just finished (though the character's animation is still going), and control was just restored.
+	if (continue_transformation == 1 && fade_out_finished)
+	{
+		if (isMainCharacter(CHARACTER_TAILS) || isMainCharacter(CHARACTER_KNUCKLES))
+		{
+			// Tails and Knuckles have to wait 10 more frames before getting to transform again.
+			continue_transformation = 2
+			// Disable control so they stay hovering in midair.
+			u8[0xffffb02e] |= (control_flag.DISABLE_UPDATE | control_flag.DISABLE_INTERACTION)
+		}
+		else
+		{
+			// Sonic gets to transform to Hyper on the next frame.
+			continue_transformation = 12
+		}
+	}
+}
+
+//# address-hook(0x08167c) end(0x0816ee)
+function void fn08167c()
+{
+	if (ddz_form == 1)
+	{
+		// Force the Super form instead of the Hyper form.
+		u8 super_emeralds_temp = global.super_emeralds
+		global.super_emeralds = 0
+		base.fn08167c()
+		global.super_emeralds = super_emeralds_temp
+	}
+	else
+	{
+		base.fn08167c()
+	}
+}
+
+/////////////////////////////
+///	   	 HYPER FIXES	  ///
+/////////////////////////////
+
+//# address-hook(0x0193ec) end(0x019486)
+function void fn0193ec()
+{
+	// Hyper stars only unload if you go to base form, not Super form. So we need to fix that.
+	if (super.active == 1)
+	{
+		super.active = 0
+		base.fn0193ec()
+		super.active = 1
+	}
+	else
+	{
+		base.fn0193ec()
+	}
+}
+
+//# address-hook(0x01a1f4) end(0x01a226)
+function void fn01a1f4()
+{
+	// Super Flickies only fly away if you go to base form, not Super form. So we need to fix that.
+	if (super.active.tails == 1)
+	{
+		super.active.tails = 0
+		base.fn01a1f4()
+		super.active.tails = 1
+	}
+	else
+	{
+		base.fn01a1f4()
+	}
+}
+
+//# address-hook(0x04e408) end(0x04e456)
+function void UpdateLevelDisplay()
+{
+	// Sometimes the stage warps the player character large distances, especially when transitioning between acts.
+	// We need to also move Tails' flicky army if this happens since they do not automatically snap to the player's position.
+	s16 xdiff.player = s16[0xffffb010]
+	s16 ydiff.player = s16[0xffffb014]
+	base.UpdateLevelDisplay()
+	xdiff.player = s16[0xffffb010] - xdiff.player
+	ydiff.player = s16[0xffffb014] - ydiff.player
+	
+	u32 flicky_address = 0xffffcd7c
+	s16 xdiff.flicky = s16[0xffffb010] - s16[flicky_address + 0x10]
+	s16 ydiff.flicky = s16[0xffffb014] - s16[flicky_address + 0x14]
+	
+	// If we're hyper tails and have flickies...
+	if (super.active.tails == 0xff && u32[flicky_address] == 0x01a1f4)
+	{
+		// If the player has moved but the flickies have not, move the 4 flickies.
+		if (abs(xdiff.player) > 0x100 && abs(xdiff.flicky) > 0x100)
+		{
+			for (u8 i = 0; i < 4; i++)
+				u16[flicky_address + 0x10 + 0x4a * i] += xdiff.player
+		}
+		if (abs(ydiff.player) > 0x100 && abs(ydiff.flicky) > 0x100)
+		{
+			for (u8 i = 0; i < 4; i++)
+				u16[flicky_address + 0x14 + 0x4a * i] += ydiff.player	
+		}
+	}
+}
+
+/////////////////////////////
+///	   RING MAGNETISM	  ///
+/////////////////////////////
+
+// It is necessary to have both of these hooks.
+
+//# address-hook(0x00ea20) end(0x00eae4)
+//# translated(0x00eaf0) end(0x00eb18)
+function void SonicUpdateRingCollection()
+{
+	u8 bonus_effect_temp = char.bonus_effect
+	// If we're super and the ring magnet setting is on...
+	if (u8[superAddress()] && super_ring_magnet)
+	{
+		// Apply Lightning shield to attract rings.
+		char.bonus_effect |= char.bonus.SHIELD_LIGHTNING
+	}
+	base.SonicUpdateRingCollection()
+	if (u8[superAddress()] && super_ring_magnet)
+	{
+		// Reset bonus.
+		char.bonus_effect = bonus_effect_temp
+	}
+}
+
+//# address-hook(0x01a88c) end(0x01a91a)
+function void DynamicRing.Update()
+{
+	// This function is called from the ring object, not the character, so we have to use direct addresses.
+	u8 super.active.local = (u8[0xffffb038] == 1) ? u8[0xfffff667] : u8[0xfffffe19]
+
+	u8 bonus_effect_temp = u8[0xffffb02b]
+	// If we're super and the ring magnet setting is on...
+	if (super.active.local && super_ring_magnet)
+	{
+		// Apply Lightning shield to attract rings.
+		u8[0xffffb02b] |= char.bonus.SHIELD_LIGHTNING
+	}
+	base.DynamicRing.Update()
+	if (super.active.local && super_ring_magnet)
+	{
+		// Reset bonus.
+		u8[0xffffb02b] = bonus_effect_temp
+	}
+}
+
+/////////////////////////////
+///		PALETTE FIXES	  ///
+/////////////////////////////
+
+// We have to apply multiple tweaks in order to make the character correctly shift colors when transforming from
+// Super to Hyper or vice versa.
+
+//# address-hook(0x003750) end(0x00398c)
+function void UpdatePaletteEffects.SuperForm()
+{
+	u8 state_temp = super.palettefx.state
+	base.UpdatePaletteEffects.SuperForm()
+	// If our Base form is Super, cancelling the Hyper form goes down to Super form.
+	// To enforce this, we have to change the palette state to the normal cycling state after the Hyper fade-out finishes.
+	if (always_super == 1 && global.zone != 0x0d && state_temp == 2 && super.palettefx.state == 0)
+	{
+		// TODO: Are these correct for Tails and Knuckles?
+		super.palettefx.state = 0xff
+		super.palettefx.timer = 0x0b
+		super.palettefx.frame = 0x30
+	}
+	// Turn off palette fixes once we are no longer in the fading in or out states.
+	if (palette_fixes && super.palettefx.state != 1 && super.palettefx.state != 2)
+		palette_fixes = 0
+
+	applyFade()
+	// Annoyingly, the code that restores control to the character after transforming is here in the palette update.
+	// So it makes sense to do this custom handling here.
+	handleContinuedTransformation(state_temp == 1 && super.palettefx.state == 0xff)
+}
+
+function void UpdatePaletteEffects.SuperForm.blendSonicKnux(u32 source1, u32 source2, u16 blendFactor, bool underwater)
+{
+	// This is true if Sonic transforms from Super to Hyper or vice versa.
+	if (palette_fixes && (getMainCharacter() == CHARACTER_SONIC) && ((super.palettefx.state == 1 || super.palettefx.state == 2)))
+	{
+		// In this situation, source1 is the address of base Sonic's blue color.
+		// If we replace it with this value, it's now Super Sonic's base yellow color.
+		// This makes the fade in/out from Hyper form go between the Super and Hyper palettes instead of from base to Hyper.
+		source1 = 0x000039be
+	}
+	base.UpdatePaletteEffects.SuperForm.blendSonicKnux(source1, source2, blendFactor, underwater)
+}
+
+function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
+{
+	// If we're not applying palette fixes, or if we're not in the fading in or out states, don't do anything.
+	if (!palette_fixes || (super.palettefx.state != 1 && super.palettefx.state != 2))
+	{
+		base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+		return
+	}
+
+	if (palette_fixes == 1 && super.palettefx.state == 1)
+	{
+		// Normally when this fade-in starts, super.palettefx.frame is always 0. But if we transform from
+		// Super to Hyper, that isn't always true. So we need to set it to 0 at the start of the fade-in.
+		palette_fixes = 2
+		super.palettefx.frame = 0
+	}
+	// Find an empty buffer in shared memory.
+	// 0x820000 is almost certainly empty, but we'll verify it anyway.
+	u8 character = getMainCharacter()
+	u32 buffer_address = 0x820000
+	u32 data = 0
+	u8 a = 0
+	while (a < 0x80)
+	{
+		data = u32[buffer_address + a]
+		a += 4
+		if (data != 0)
+		{
+			buffer_address += a
+			a = 0
+		}
+	}
+	// The colors in the "source" address are the character's base colors with no super palette.
+	// Normally, this function blends the hyper colors with the base colors to create the fade-in/out effect.
+	// We need to blend the hyper colors with the super colors instead, since we're transitioning from hyper to super.
+	// To do this, we replace the colors at the "source" address with the super colors.
+	for (u8 underwater = 0; underwater < (level.water_present ? 2 : 1); ++underwater)
+	{
+		u32 offset = character * 0x40 + (underwater ? 0x300 : 0)
+		u32 source = 0x802180 + offset
+		u32 dest = 0x802000 + offset
+		copyMemory(buffer_address + underwater * 0x40, source, 0x40)
+		u8 line = getModdedPaletteLine(character, 0, underwater)
+		u16 numColors = System.loadExternalPaletteData(getCharacterPaletteKey(character), line, 0x800000, 0x20)
+		for (u8 i = 0; i < numColors; i++)
+		{
+			u32 rgba = u32[0x800000 + i * 4]
+			rgba = (rgba & 0xff000000) ? packColorExt(rgba) : 0
+			if (rgba != 0)
+				u16[source + i * 2] = rgba
+		}
+	}
+	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+	u32 offset = character * 0x40
+	copyMemory(0x802180 + offset, buffer_address, 0x40)
+	if (level.water_present)
+		copyMemory(0x802480 + offset, buffer_address + 0x40, 0x40)
+	zeroMemory(buffer_address, 0x80)
+}
+
+/////////////////////////////
+///		PALETTE FADING	  ///
+/////////////////////////////
+
+// Helper function
+function u32 getSuperPaletteAddress()
+{
+	u32 address = 0x802000
+	u8 char = getMainCharacter()
+
+	if (char == CHARACTER_TAILS)
+		address += 0x40
+	if (char == CHARACTER_KNUCKLES)
+		address += 0x80
+
+	return address
+}
+
+//# address-hook(0x003bb8) end(0x003be2)
+function void UpdatePaletteEffects()
+{
+	if (global.fade_timer == 0)
+	{
+		updateColorReference()
+	}
+	base.UpdatePaletteEffects()
+	if (global.fade_timer != 0)
+	{
+		updateColorReference()
+	}
+}
+
+// Helper function
+function void updateColorReference()
+{
+	u16 black_reference = char.black
+	u16 white_reference = char.white
+	// Figure out the current palette fading:
+	if (black_reference != 0 || white_reference != 0x0eee)
+	{
+		// Brightening?
+		if ((white_reference == 0) || (black_reference > black_reference.prev) || (white_reference > white_reference.prev))
+		{
+			fade_bright = true
+			fade_dark = false
+		}
+		// Darkening?
+		else if ((black_reference == 0x0eee) || (black_reference < black_reference.prev) || (white_reference < white_reference.prev))
+		{
+			fade_bright = false
+			fade_dark = true
+		}
+	}
+	else // No fading
+	{
+		fade_bright = false
+		fade_dark = false
+	}
+	black_reference.prev = black_reference
+	white_reference.prev = white_reference
+}
+
+// Helper function
+function void applyFade()
+{
+	if (char.black == 0 && char.white == 0x0eee)
+		return
+	debugLog("Fade")
+	debugLog(fade_bright)
+	debugLog(fade_dark)
+	u16 ref_color = (char.black != 0) ? char.black : char.white
+	if ((extractColor(ref_color, 0) == extractColor(ref_color, 1) && extractColor(ref_color, 1) == extractColor(ref_color, 2)))
+	{
+		fadePaletteUniform(getSuperPaletteAddress(), 0x40)
+		if (super.active.tails == 0xff && u32[0xffffcd7c] == 0x01a1f4)
+			fadePaletteUniform(0xfffffc04, 6)
+	}
+	else
+	{
+		fadePaletteNormal(getSuperPaletteAddress(), 0x40)
+		if (super.active.tails == 0xff && u32[0xffffcd7c] == 0x01a1f4)
+			fadePaletteNormal(0xfffffc04, 6)
+	}
+}
+
+// Helper function
+function void fadePaletteNormal(u32 address, u8 len)
+{
+	u8 char = getMainCharacter()
+	u16 fade_level = (char.black != 0) ? char.black : char.white
+	// This calculation gives us how many "ticks" of fade-in are being applied this frame.
+	fade_level = (fade_level >> 9) + ((fade_level & 0x00ff) >> 5) + ((fade_level & 0x000f) >> 1)
+	// Loop through the entire palette line, including the extra colors reserved for modded palettes.
+	// For non-modded palettes, those extra colors are always 0 and don't matter either way.
+	for (u8 i = 0; i < len; i += 2)
+	{
+		u16 fade = fade_level
+		u16 new_color = 0
+		if (u16[address + i] & 0x8000)
+			u16[address + i] = makeNormalPackedColor(u16[address + i])
+		// Loop through the RGB values of each color.
+		for (u8 j = 0; j < 3; j++)
+		{
+			u16 count = extractColor(u16[address + i], j)
+			// Only keep as much of the color as is allowed by the current level of fade-in.
+			count = min(count, fade)
+			new_color |= (0x0200 >> 4 * j) * count
+			fade -= count
+		}
+		u16[address + i] = new_color
+	}
+}
+
+// Helper function
+function void fadePaletteUniform(u32 address, u8 len)
+{
+	//u32 address = getSuperPaletteAddress()
+	u8 char = getMainCharacter()
+	u16 fade_level = (char.black != 0) ? char.black : char.white
+	// This calculation gives us how many "ticks" of fade-in are being applied this frame.
+	fade_level = (fade_level & 0x000f) >> 1
+	debugLog("uniform fade level:")
+	debugLog(fade_level)
+	// Loop through the entire palette line, including the extra colors reserved for modded palettes.
+	// For non-modded palettes, those extra colors are always 0 and don't matter either way.
+	for (u8 i = 0; i < len; i += 2)
+	{
+		u16 new_color = 0
+		if (u16[address + i] & 0x8000)
+			u16[address + i] = makeNormalPackedColor(u16[address + i])
+		bool debug = (i == 0 && len == 0x40)
+		// Loop through the RGB values of each color.
+		for (u8 j = 0; j < 3; j++)
+		{
+			// Bit-mask one specific color and shift it down to the least-significant bits.
+			u16 count = extractColor(u16[address + i], j)
+			if (debug)
+				debugLog(count)
+			if (true)//(fade_dark)
+				count = max(fade_level, count)
+			else
+				count = min(count + fade_level, 7)
+			if (debug)
+				debugLog(count)
+			new_color |= (0x0200 >> 4 * j) * count
+		}
+		u16[address + i] = new_color
+	}
+}
+
+// Helper function
+function u16 extractColor(u16 color, u16 index)
+{
+	return (color & ((0x1000 >> (4 * index)) - 1)) >> (9 - 4 * index)
+}
+
+/////////////////////////////
+///	  CUTSCENE HANDLING	  ///
+/////////////////////////////
+
+//# translated(0x0117da) end(0x0118ba)
+//# translated(0x015002) end(0x0150d8)
+//# translated(0x017710) end(0x0177e8)
+function bool Character.CheckStartJump()
+{
+	bool result = false
+	// If the player has a Super/Hyper base form, we need to disable the their extra jump height during cutscenes.
+	if (always_super && player1.control_override)
+	{
+		u8 super_temp = u8[superAddress()]
+		u8[superAddress()] = 0
+		result = base.Character.CheckStartJump()
+		u8[superAddress()] = super_temp
+	}
+	else
+	{
+		result = base.Character.CheckStartJump()
+	}
+	return result
+}
+
+// Helper function.
+function void handleCutsceneSpeedcap()
+{
+	u32 speedcap_address = (char.character == CHARACTER_TAILS) ? 0xfffffec0 : 0xfffff760
+	// If the player has a Super/Hyper base form, we need to disable the their extra move speed during cutscenes.
+	if (always_super && player1.control_override && cutscene_speedcap == 0)
+	{
+		cutscene_speedcap = 1
+		u8 super_temp = u8[superAddress()]
+		u8[superAddress()] = 0
+		setSpeedCapProperties(speedcap_address)
+		u8[superAddress()] = super_temp
+	}
+	else if (cutscene_speedcap == 1 && !player1.control_override)
+	{
+		cutscene_speedcap = 0
+		setSpeedCapProperties(speedcap_address)
+	}
+}
+
+// Unfortunately we have to hook all 3 NormalState functions to make this work.
+
+//# address-hook(0x010bba) end(0x010c8e)
+function void Character.UpdateNormalState.Sonic()
+{
+	handleCutsceneSpeedcap()
+	base.Character.UpdateNormalState.Sonic()
+}
+
+//# address-hook(0x0137c4) end(0x0138f4)
+function void Character.UpdateNormalState.Tails()
+{
+	handleCutsceneSpeedcap()
+	base.Character.UpdateNormalState.Tails()
+}
+
+//# address-hook(0x01656c) end(0x016640)
+function void Character.UpdateNormalState.Knuckles()
+{
+	handleCutsceneSpeedcap()
+	base.Character.UpdateNormalState.Knuckles()
+}
+
+/////////////////////////////
+///		AIZ CUTSCENE	  ///
+/////////////////////////////
+
+global u8 slowdown_timer
+
+//# address-hook(0x061d92) end(0x061daa)
+function void fn061d92()
+{
+	// This is Cutscene Knuckles' update function.
+	
+	if (always_super)
+	{
+		// Make him never show up.
+		UnloadObject()
+		return
+	}
+	base.fn061d92()
+}
+
+//# address-hook(0x067a08) end(0x067a1e)
+function void fn067a08()
+{
+	// Sonic in the cutscene moves extremely fast; too fast to look or feel good once we regain control in a super form.
+	// So we need to slow him down.
+	if (always_super && u16[0xffffb010] >= 0x0d80 && u16[A0 + 0x40] > 0x0a)
+	{
+		if (slowdown_timer == 0)
+		{
+			// u16[A0 + 0x40] stores Sonic's horizontal speed in the cutscene.
+			u16[A0 + 0x40] -= 1
+			if (u16[A0 + 0x40] > 0x0a)
+				slowdown_timer = 18
+		}
+		else
+		{
+			slowdown_timer--
+		}
+	}
+	base.fn067a08()
+}
+
+//# address-hook(0x067704) end(0x067774)
+function void fn067704()
+{
+	// This is the function that progresses the cutscene to Knuckles punching Super Sonic if Sonic is far enough to the right.
+	// 0x13d0 is the normal x-position trigger for knuckles punching you. Slightly before that, we'll do our thing.
+	if (always_super && u16[0xffffb010] >= 0x13b0)
+	{
+		// Instead, skip straight to the end of the cutscene and continue as Super Sonic.
+		// This object will get unloaded by the end of this call, so changing objA0.* values is fine.
+		objA0.render_flags &= ~render_flag.VISIBLE
+		// These are the the numbers that normally go into fn0851e4(), which gets called by fn061f10().
+		// I have no idea what fn0851e4() does or if it's needed, but I'll take this precaution anyway.
+		u16[A0 + 0x3c] = 0xfa9a
+		objA0.value3b = 1
+		// This function ends the cutscene. It's normally called by Cutscene Knuckles, but calling it here works fine.
+		fn061f10()
+
+		// Don't need to use a register here, but I know it's safe and it makes things more readable.
+		A1 = 0xffffb000
+		// The cutscene does not actually set Super Sonic's speed as he moves, so we have to do it here.
+		objA1.velocity.x = 0xa00
+		objA1.groundspeed = 0xa00
+		objA1.flags2e = 0 //char.control_flags; doing this restores control to the player.
+
+		initSuperForm(u8[A1 + 0x38]) // char.character
+		UpdatePaletteEffects.SuperForm()
+		return
+	}
+	base.fn067704()
+}
+
+/////////////////////////////
+///	  	  SOZ-2 FIX 	  ///
+/////////////////////////////
+
+// The start of SOZ-2 has a custom fade-in that also fades in the character's palette alongside the stage.
+// No other stage in the game works like this, and as a result, we need custom handling for it.
+
+global u16 offset_fade
+
+//# address-hook(0x056324)
+function void fn056324()
+{
+	if (!always_super)
+	{
+		base.fn056324()
+		return
+	}
+
+	base.fn056324()
+	updateSuperPaletteFixed()
+}
+
+//# address-hook(0x056366)
+function void fn056366()
+{
+	base.fn056366()
+	u8 char = getMainCharacter()
+	updateSuperPaletteFixed()
+}
+
+function void updateSuperPaletteFixed()
+{
+	u8 char = getMainCharacter()
+	if (char == CHARACTER_TAILS)
+	{
+		super.palettefx.frame.tails = 0x06
+		super.palettefx.timer.tails = 0
+	}
+	else
+	{
+		super.palettefx.frame = 0x2a
+		super.palettefx.timer = 0
+	}
+	UpdatePaletteEffects.SuperForm()
+}
+
+function void updateSuperPaletteRelative()
+{
+	super.palettefx.timer += 1
+	if (getMainCharacter() == CHARACTER_TAILS)
+		super.palettefx.timer.tails += 1
+	UpdatePaletteEffects.SuperForm()
+}
+/*
+//# address-hook(0x085ef8) end(0x085f24)
+function void fn085ef8()
+{
+	if (objA0.countdown_value > 0)
+	{
+		base.fn085ef8()
+		return
+	}
+	base.fn085ef8()
+	super.palettefx.timer += 1
+	if (getMainCharacter() == CHARACTER_TAILS)
+		super.palettefx.timer.tails += 1
+	UpdatePaletteEffects.SuperForm()
+}*/
+
+function void fadePaletteTowardsTargetUniform()
+{
+	base.fadePaletteTowardsTargetUniform()
+	updateSuperPaletteRelative()
+}
+
+function void fadePaletteToWhiteUniform()
+{
+	base.fadePaletteToWhiteUniform()
+	updateSuperPaletteRelative()
+}
+
+// TODO, Always Super issues:
+// - Sonic has the wrong palette for 1 frame when Always Super is active and the fn067704() hook runs.
+// - Super Sonic floats a little too low and doesn't respect terrain. Nudge him up a bit before restoring control with Always Super.
+// - In the white screenfades in LRZ-3 and DDZ, the fading uses base palette instead of super palette, causing visual issues.
+// - Make Knuckles start in base form in his intro, then jump and transform to super before the cutscene ends.
