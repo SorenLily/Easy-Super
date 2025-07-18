@@ -20,15 +20,9 @@ global u8 continue_transformation
 global u8 cutscene_speedcap
 // Counter for adjusting the positions of the super flickies on initialization.
 global u8 adjust_flickies
-// Indicates the palette is fading towards white or towards black.
-global bool fade_bright
-global bool fade_dark
-// Used to calculate the above.
-global u16 black_reference.prev
-global u16 white_reference.prev
 
-define u16 char.black = u16[0xfffffc00]
-define u16 char.white = u16[0xfffffc02]
+global bool normal_palette_update
+// Indicates the palette is fading towards white or towards black.
 
 // Helper function
 function u32 superAddress()
@@ -531,7 +525,22 @@ function void DynamicRing.Update()
 function void UpdatePaletteEffects.SuperForm()
 {
 	u8 state_temp = super.palettefx.state
-	base.UpdatePaletteEffects.SuperForm()
+	if (normal_palette_update && (u16[0xfffffc00] != 0 || u16[0xfffffc02] != 0x0eee))
+	{
+		u32 buffer_address = getEmptyBuffer(0x46)
+		u32 offset = getMainCharacter() * 0x40
+		copyMemory(buffer_address, 0x802000 + offset, 0x40)
+		copyMemory(buffer_address + 0x40, 0xfffffc04, 0x6)
+		base.UpdatePaletteEffects.SuperForm()
+		copyMemory(0x802000 + offset, buffer_address, 0x40)
+		copyMemory(0xfffffc04, buffer_address + 0x40, 0x6)
+		zeroMemory(buffer_address, 0x46)
+	}
+	else
+	{
+		base.UpdatePaletteEffects.SuperForm()
+	}
+	
 	// If our Base form is Super, cancelling the Hyper form goes down to Super form.
 	// To enforce this, we have to change the palette state to the normal cycling state after the Hyper fade-out finishes.
 	if (always_super == 1 && global.zone != 0x0d && state_temp == 2 && super.palettefx.state == 0)
@@ -545,7 +554,7 @@ function void UpdatePaletteEffects.SuperForm()
 	if (palette_fixes && super.palettefx.state != 1 && super.palettefx.state != 2)
 		palette_fixes = 0
 
-	applyFade()
+	//applyFade()
 	// Annoyingly, the code that restores control to the character after transforming is here in the palette update.
 	// So it makes sense to do this custom handling here.
 	handleContinuedTransformation(state_temp == 1 && super.palettefx.state == 0xff)
@@ -564,6 +573,24 @@ function void UpdatePaletteEffects.SuperForm.blendSonicKnux(u32 source1, u32 sou
 	base.UpdatePaletteEffects.SuperForm.blendSonicKnux(source1, source2, blendFactor, underwater)
 }
 
+function u32 getEmptyBuffer(u32 len)
+{
+	// Find an empty buffer in shared memory.
+	// 0x820000 is almost certainly empty, but we'll verify it anyway.
+	u32 buffer_address = 0x820000
+	u8 i = 0
+	while (i < len)
+	{
+		i += 4
+		if (u32[buffer_address + i] != 0)
+		{
+			buffer_address += i
+			i = 0
+		}
+	}
+	return buffer_address
+}
+
 function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
 {
 	// If we're not applying palette fixes, or if we're not in the fading in or out states, don't do anything.
@@ -580,26 +607,20 @@ function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
 		palette_fixes = 2
 		super.palettefx.frame = 0
 	}
-	// Find an empty buffer in shared memory.
-	// 0x820000 is almost certainly empty, but we'll verify it anyway.
-	u8 character = getMainCharacter()
-	u32 buffer_address = 0x820000
-	u32 data = 0
-	u8 a = 0
-	while (a < 0x80)
-	{
-		data = u32[buffer_address + a]
-		a += 4
-		if (data != 0)
-		{
-			buffer_address += a
-			a = 0
-		}
-	}
+	
+	u32 buffer_address = getEmptyBuffer(0x80)
 	// The colors in the "source" address are the character's base colors with no super palette.
 	// Normally, this function blends the hyper colors with the base colors to create the fade-in/out effect.
 	// We need to blend the hyper colors with the super colors instead, since we're transitioning from hyper to super.
 	// To do this, we replace the colors at the "source" address with the super colors.
+	modifyReferencePalette(buffer_address, 1)
+	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+	restoreReferencePalette(buffer_address)
+}
+
+function void modifyReferencePalette(u32 buffer_address, u8 palette_type)
+{
+	u8 character = getMainCharacter()
 	for (u8 underwater = 0; underwater < (level.water_present ? 2 : 1); ++underwater)
 	{
 		u32 offset = character * 0x40 + (underwater ? 0x300 : 0)
@@ -616,8 +637,11 @@ function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
 				u16[source + i * 2] = rgba
 		}
 	}
-	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
-	u32 offset = character * 0x40
+}
+
+function void restoreReferencePalette(u32 buffer_address)
+{
+	u32 offset = getMainCharacter() * 0x40
 	copyMemory(0x802180 + offset, buffer_address, 0x40)
 	if (level.water_present)
 		copyMemory(0x802480 + offset, buffer_address + 0x40, 0x40)
@@ -645,139 +669,9 @@ function u32 getSuperPaletteAddress()
 //# address-hook(0x003bb8) end(0x003be2)
 function void UpdatePaletteEffects()
 {
-	if (global.fade_timer == 0)
-	{
-		updateColorReference()
-	}
+	normal_palette_update = true
 	base.UpdatePaletteEffects()
-	if (global.fade_timer != 0)
-	{
-		updateColorReference()
-	}
-}
-
-// Helper function
-function void updateColorReference()
-{
-	u16 black_reference = char.black
-	u16 white_reference = char.white
-	// Figure out the current palette fading:
-	if (black_reference != 0 || white_reference != 0x0eee)
-	{
-		// Brightening?
-		if ((white_reference == 0) || (black_reference > black_reference.prev) || (white_reference > white_reference.prev))
-		{
-			fade_bright = true
-			fade_dark = false
-		}
-		// Darkening?
-		else if ((black_reference == 0x0eee) || (black_reference < black_reference.prev) || (white_reference < white_reference.prev))
-		{
-			fade_bright = false
-			fade_dark = true
-		}
-	}
-	else // No fading
-	{
-		fade_bright = false
-		fade_dark = false
-	}
-	black_reference.prev = black_reference
-	white_reference.prev = white_reference
-}
-
-// Helper function
-function void applyFade()
-{
-	if (char.black == 0 && char.white == 0x0eee)
-		return
-	debugLog("Fade")
-	debugLog(fade_bright)
-	debugLog(fade_dark)
-	u16 ref_color = (char.black != 0) ? char.black : char.white
-	if ((extractColor(ref_color, 0) == extractColor(ref_color, 1) && extractColor(ref_color, 1) == extractColor(ref_color, 2)))
-	{
-		fadePaletteUniform(getSuperPaletteAddress(), 0x40)
-		if (super.active.tails == 0xff && u32[0xffffcd7c] == 0x01a1f4)
-			fadePaletteUniform(0xfffffc04, 6)
-	}
-	else
-	{
-		fadePaletteNormal(getSuperPaletteAddress(), 0x40)
-		if (super.active.tails == 0xff && u32[0xffffcd7c] == 0x01a1f4)
-			fadePaletteNormal(0xfffffc04, 6)
-	}
-}
-
-// Helper function
-function void fadePaletteNormal(u32 address, u8 len)
-{
-	u8 char = getMainCharacter()
-	u16 fade_level = (char.black != 0) ? char.black : char.white
-	// This calculation gives us how many "ticks" of fade-in are being applied this frame.
-	fade_level = (fade_level >> 9) + ((fade_level & 0x00ff) >> 5) + ((fade_level & 0x000f) >> 1)
-	// Loop through the entire palette line, including the extra colors reserved for modded palettes.
-	// For non-modded palettes, those extra colors are always 0 and don't matter either way.
-	for (u8 i = 0; i < len; i += 2)
-	{
-		u16 fade = fade_level
-		u16 new_color = 0
-		if (u16[address + i] & 0x8000)
-			u16[address + i] = makeNormalPackedColor(u16[address + i])
-		// Loop through the RGB values of each color.
-		for (u8 j = 0; j < 3; j++)
-		{
-			u16 count = extractColor(u16[address + i], j)
-			// Only keep as much of the color as is allowed by the current level of fade-in.
-			count = min(count, fade)
-			new_color |= (0x0200 >> 4 * j) * count
-			fade -= count
-		}
-		u16[address + i] = new_color
-	}
-}
-
-// Helper function
-function void fadePaletteUniform(u32 address, u8 len)
-{
-	//u32 address = getSuperPaletteAddress()
-	u8 char = getMainCharacter()
-	u16 fade_level = (char.black != 0) ? char.black : char.white
-	// This calculation gives us how many "ticks" of fade-in are being applied this frame.
-	fade_level = (fade_level & 0x000f) >> 1
-	debugLog("uniform fade level:")
-	debugLog(fade_level)
-	// Loop through the entire palette line, including the extra colors reserved for modded palettes.
-	// For non-modded palettes, those extra colors are always 0 and don't matter either way.
-	for (u8 i = 0; i < len; i += 2)
-	{
-		u16 new_color = 0
-		if (u16[address + i] & 0x8000)
-			u16[address + i] = makeNormalPackedColor(u16[address + i])
-		bool debug = (i == 0 && len == 0x40)
-		// Loop through the RGB values of each color.
-		for (u8 j = 0; j < 3; j++)
-		{
-			// Bit-mask one specific color and shift it down to the least-significant bits.
-			u16 count = extractColor(u16[address + i], j)
-			if (debug)
-				debugLog(count)
-			if (true)//(fade_dark)
-				count = max(fade_level, count)
-			else
-				count = min(count + fade_level, 7)
-			if (debug)
-				debugLog(count)
-			new_color |= (0x0200 >> 4 * j) * count
-		}
-		u16[address + i] = new_color
-	}
-}
-
-// Helper function
-function u16 extractColor(u16 color, u16 index)
-{
-	return (color & ((0x1000 >> (4 * index)) - 1)) >> (9 - 4 * index)
+	normal_palette_update = false
 }
 
 /////////////////////////////
@@ -805,7 +699,7 @@ function bool Character.CheckStartJump()
 	return result
 }
 
-// Helper function.
+// Helper function
 function void handleCutsceneSpeedcap()
 {
 	u32 speedcap_address = (char.character == CHARACTER_TAILS) ? 0xfffffec0 : 0xfffff760
@@ -922,7 +816,7 @@ function void fn067704()
 }
 
 /////////////////////////////
-///	  	  SOZ-2 FIX 	  ///
+///    SCREENFADE FIXES   ///
 /////////////////////////////
 
 // The start of SOZ-2 has a custom fade-in that also fades in the character's palette alongside the stage.
@@ -939,18 +833,124 @@ function void fn056324()
 		return
 	}
 
-	base.fn056324()
+	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 offset = getMainCharacter() * 0x40
+	copyMemory(buffer_address, 0x802000 + offset, 0x40)
+	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
+	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
+	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
+
+	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
+	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
 	updateSuperPaletteFixed()
+	for (u8 i = 0; i < 6; i += 2)
+		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
+	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
+	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
+
+	copyMemory(0x802000 + offset, buffer_address, 0x40)
+	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	base.fn056324()
+	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
+	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
+	zeroMemory(buffer_address, 0x8c)
 }
 
 //# address-hook(0x056366)
 function void fn056366()
 {
-	base.fn056366()
-	u8 char = getMainCharacter()
+	if (!always_super)
+	{
+		base.fn056366()
+		return
+	}
+
+	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 offset = getMainCharacter() * 0x40
+	copyMemory(buffer_address, 0x802000 + offset, 0x40)
+	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
+	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
+	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
+
+	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
+	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
 	updateSuperPaletteFixed()
+	for (u8 i = 0; i < 6; i += 2)
+		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
+	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
+	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
+
+	copyMemory(0x802000 + offset, buffer_address, 0x40)
+	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	base.fn056366()
+	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
+	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
+	zeroMemory(buffer_address, 0x8c)
 }
 
+function void fadePaletteTowardsTargetUniform()
+{
+	if (!always_super)
+	{
+		base.fadePaletteTowardsTargetUniform()
+		return
+	}
+
+	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 offset = getMainCharacter() * 0x40
+	copyMemory(buffer_address, 0x802000 + offset, 0x40)
+	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
+	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
+	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
+
+	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
+	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
+	updateSuperPaletteRelative()
+	for (u8 i = 0; i < 6; i += 2)
+		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
+	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
+	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
+
+	copyMemory(0x802000 + offset, buffer_address, 0x40)
+	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	base.fadePaletteTowardsTargetUniform()
+	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
+	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
+	zeroMemory(buffer_address, 0x8c)
+}
+
+function void fadePaletteToWhiteUniform()
+{
+	if (!always_super)
+	{
+		base.fadePaletteToWhiteUniform()
+		return
+	}
+
+	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 offset = getMainCharacter() * 0x40
+	copyMemory(buffer_address, 0x802000 + offset, 0x40)
+	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
+	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
+	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
+
+	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
+	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
+	updateSuperPaletteRelative()
+	for (u8 i = 0; i < 6; i += 2)
+		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
+	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
+	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
+
+	copyMemory(0x802000 + offset, buffer_address, 0x40)
+	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	base.fadePaletteToWhiteUniform()
+	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
+	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
+	zeroMemory(buffer_address, 0x8c)
+}
+
+// Helper function
 function void updateSuperPaletteFixed()
 {
 	u8 char = getMainCharacter()
@@ -959,47 +959,20 @@ function void updateSuperPaletteFixed()
 		super.palettefx.frame.tails = 0x06
 		super.palettefx.timer.tails = 0
 	}
-	else
-	{
-		super.palettefx.frame = 0x2a
-		super.palettefx.timer = 0
-	}
+
+	super.palettefx.frame = 0x2a
+	super.palettefx.timer = 0
+
 	UpdatePaletteEffects.SuperForm()
 }
 
+// Helper function
 function void updateSuperPaletteRelative()
 {
 	super.palettefx.timer += 1
 	if (getMainCharacter() == CHARACTER_TAILS)
 		super.palettefx.timer.tails += 1
 	UpdatePaletteEffects.SuperForm()
-}
-/*
-//# address-hook(0x085ef8) end(0x085f24)
-function void fn085ef8()
-{
-	if (objA0.countdown_value > 0)
-	{
-		base.fn085ef8()
-		return
-	}
-	base.fn085ef8()
-	super.palettefx.timer += 1
-	if (getMainCharacter() == CHARACTER_TAILS)
-		super.palettefx.timer.tails += 1
-	UpdatePaletteEffects.SuperForm()
-}*/
-
-function void fadePaletteTowardsTargetUniform()
-{
-	base.fadePaletteTowardsTargetUniform()
-	updateSuperPaletteRelative()
-}
-
-function void fadePaletteToWhiteUniform()
-{
-	base.fadePaletteToWhiteUniform()
-	updateSuperPaletteRelative()
 }
 
 // TODO, Always Super issues:
