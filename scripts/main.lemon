@@ -24,6 +24,11 @@ global u8 adjust_flickies
 global bool normal_palette_update
 // Indicates the palette is fading towards white or towards black.
 
+constant u32 fading_address.flicky = 0xfffffc04
+constant u32 nonfading_address.flicky = 0xfffffc84
+constant u32 fading_address.char = 0x802000
+constant u32 nonfading_address.char = 0x802180
+
 // Helper function
 function u32 superAddress()
 {
@@ -319,7 +324,7 @@ function void Character.updateJumpMoves()
 	}
 
 	// If the "Go Super then Hyper" setting is on and we're in Super form and we're eligible to go Hyper and we have the correct state and button pressed...
-	if (progressive_forms && super_temp == 1 && ring_counter >= (100 - ring_req_hyper.setting) && global.super_emeralds >= 7 && char.jumping && char.double_jump_state == 0 && Input.buttonPressed(BUTTON_Y) && char.invuln.countdown == 0)
+	if (progressive_forms && super_temp == 1 && global.super_emeralds >= 7 && char.jumping && char.double_jump_state == 0 && Input.buttonPressed(BUTTON_Y) && char.invuln.countdown == 0)
 	{
 		// Super state has to be modified here so that Character.performSuperTransformation() gets reached.
 		u8[superAddress()] = 0
@@ -515,166 +520,6 @@ function void DynamicRing.Update()
 }
 
 /////////////////////////////
-///		PALETTE FIXES	  ///
-/////////////////////////////
-
-// We have to apply multiple tweaks in order to make the character correctly shift colors when transforming from
-// Super to Hyper or vice versa.
-
-//# address-hook(0x003750) end(0x00398c)
-function void UpdatePaletteEffects.SuperForm()
-{
-	u8 state_temp = super.palettefx.state
-	if (normal_palette_update && (u16[0xfffffc00] != 0 || u16[0xfffffc02] != 0x0eee))
-	{
-		u32 buffer_address = getEmptyBuffer(0x46)
-		u32 offset = getMainCharacter() * 0x40
-		copyMemory(buffer_address, 0x802000 + offset, 0x40)
-		copyMemory(buffer_address + 0x40, 0xfffffc04, 0x6)
-		base.UpdatePaletteEffects.SuperForm()
-		copyMemory(0x802000 + offset, buffer_address, 0x40)
-		copyMemory(0xfffffc04, buffer_address + 0x40, 0x6)
-		zeroMemory(buffer_address, 0x46)
-	}
-	else
-	{
-		base.UpdatePaletteEffects.SuperForm()
-	}
-	
-	// If our Base form is Super, cancelling the Hyper form goes down to Super form.
-	// To enforce this, we have to change the palette state to the normal cycling state after the Hyper fade-out finishes.
-	if (always_super == 1 && global.zone != 0x0d && state_temp == 2 && super.palettefx.state == 0)
-	{
-		// TODO: Are these correct for Tails and Knuckles?
-		super.palettefx.state = 0xff
-		super.palettefx.timer = 0x0b
-		super.palettefx.frame = 0x30
-	}
-	// Turn off palette fixes once we are no longer in the fading in or out states.
-	if (palette_fixes && super.palettefx.state != 1 && super.palettefx.state != 2)
-		palette_fixes = 0
-
-	//applyFade()
-	// Annoyingly, the code that restores control to the character after transforming is here in the palette update.
-	// So it makes sense to do this custom handling here.
-	handleContinuedTransformation(state_temp == 1 && super.palettefx.state == 0xff)
-}
-
-function void UpdatePaletteEffects.SuperForm.blendSonicKnux(u32 source1, u32 source2, u16 blendFactor, bool underwater)
-{
-	// This is true if Sonic transforms from Super to Hyper or vice versa.
-	if (palette_fixes && (getMainCharacter() == CHARACTER_SONIC) && ((super.palettefx.state == 1 || super.palettefx.state == 2)))
-	{
-		// In this situation, source1 is the address of base Sonic's blue color.
-		// If we replace it with this value, it's now Super Sonic's base yellow color.
-		// This makes the fade in/out from Hyper form go between the Super and Hyper palettes instead of from base to Hyper.
-		source1 = 0x000039be
-	}
-	base.UpdatePaletteEffects.SuperForm.blendSonicKnux(source1, source2, blendFactor, underwater)
-}
-
-function u32 getEmptyBuffer(u32 len)
-{
-	// Find an empty buffer in shared memory.
-	// 0x820000 is almost certainly empty, but we'll verify it anyway.
-	u32 buffer_address = 0x820000
-	u8 i = 0
-	while (i < len)
-	{
-		i += 4
-		if (u32[buffer_address + i] != 0)
-		{
-			buffer_address += i
-			i = 0
-		}
-	}
-	return buffer_address
-}
-
-function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
-{
-	// If we're not applying palette fixes, or if we're not in the fading in or out states, don't do anything.
-	if (!palette_fixes || (super.palettefx.state != 1 && super.palettefx.state != 2))
-	{
-		base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
-		return
-	}
-
-	if (palette_fixes == 1 && super.palettefx.state == 1)
-	{
-		// Normally when this fade-in starts, super.palettefx.frame is always 0. But if we transform from
-		// Super to Hyper, that isn't always true. So we need to set it to 0 at the start of the fade-in.
-		palette_fixes = 2
-		super.palettefx.frame = 0
-	}
-	
-	u32 buffer_address = getEmptyBuffer(0x80)
-	// The colors in the "source" address are the character's base colors with no super palette.
-	// Normally, this function blends the hyper colors with the base colors to create the fade-in/out effect.
-	// We need to blend the hyper colors with the super colors instead, since we're transitioning from hyper to super.
-	// To do this, we replace the colors at the "source" address with the super colors.
-	modifyReferencePalette(buffer_address, 1)
-	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
-	restoreReferencePalette(buffer_address)
-}
-
-function void modifyReferencePalette(u32 buffer_address, u8 palette_type)
-{
-	u8 character = getMainCharacter()
-	for (u8 underwater = 0; underwater < (level.water_present ? 2 : 1); ++underwater)
-	{
-		u32 offset = character * 0x40 + (underwater ? 0x300 : 0)
-		u32 source = 0x802180 + offset
-		u32 dest = 0x802000 + offset
-		copyMemory(buffer_address + underwater * 0x40, source, 0x40)
-		u8 line = getModdedPaletteLine(character, 0, underwater)
-		u16 numColors = System.loadExternalPaletteData(getCharacterPaletteKey(character), line, 0x800000, 0x20)
-		for (u8 i = 0; i < numColors; i++)
-		{
-			u32 rgba = u32[0x800000 + i * 4]
-			rgba = (rgba & 0xff000000) ? packColorExt(rgba) : 0
-			if (rgba != 0)
-				u16[source + i * 2] = rgba
-		}
-	}
-}
-
-function void restoreReferencePalette(u32 buffer_address)
-{
-	u32 offset = getMainCharacter() * 0x40
-	copyMemory(0x802180 + offset, buffer_address, 0x40)
-	if (level.water_present)
-		copyMemory(0x802480 + offset, buffer_address + 0x40, 0x40)
-	zeroMemory(buffer_address, 0x80)
-}
-
-/////////////////////////////
-///		PALETTE FADING	  ///
-/////////////////////////////
-
-// Helper function
-function u32 getSuperPaletteAddress()
-{
-	u32 address = 0x802000
-	u8 char = getMainCharacter()
-
-	if (char == CHARACTER_TAILS)
-		address += 0x40
-	if (char == CHARACTER_KNUCKLES)
-		address += 0x80
-
-	return address
-}
-
-//# address-hook(0x003bb8) end(0x003be2)
-function void UpdatePaletteEffects()
-{
-	normal_palette_update = true
-	base.UpdatePaletteEffects()
-	normal_palette_update = false
-}
-
-/////////////////////////////
 ///	  CUTSCENE HANDLING	  ///
 /////////////////////////////
 
@@ -816,13 +661,139 @@ function void fn067704()
 }
 
 /////////////////////////////
+///		PALETTE FIXES	  ///
+/////////////////////////////
+
+// We have to apply multiple tweaks in order to make the character correctly shift colors when transforming from
+// Super to Hyper or vice versa.
+
+//# address-hook(0x003750) end(0x00398c)
+function void UpdatePaletteEffects.SuperForm()
+{
+	u8 state_temp = super.palettefx.state
+	if (normal_palette_update && (u16[0xfffffc00] != 0 || u16[0xfffffc02] != 0x0eee))
+	{
+		u32 buffer_address = getEmptyBuffer(0x46)
+		u32 offset = getMainCharacter() * 0x40
+		copyMemory(buffer_address, fading_address.char + offset, 0x40)
+		copyMemory(buffer_address + 0x40, fading_address.flicky, 0x6)
+		base.UpdatePaletteEffects.SuperForm()
+		copyMemory(fading_address.char + offset, buffer_address, 0x40)
+		copyMemory(fading_address.flicky, buffer_address + 0x40, 0x6)
+		zeroMemory(buffer_address, 0x46)
+	}
+	else
+	{
+		base.UpdatePaletteEffects.SuperForm()
+	}
+	
+	// If our Base form is Super, cancelling the Hyper form goes down to Super form.
+	// To enforce this, we have to change the palette state to the normal cycling state after the Hyper fade-out finishes.
+	if (always_super == 1 && global.zone != 0x0d && state_temp == 2 && super.palettefx.state == 0)
+	{
+		// TODO: Are these correct for Tails and Knuckles?
+		super.palettefx.state = 0xff
+		super.palettefx.timer = 0x0
+		super.palettefx.frame = 0x2a
+	}
+	// Turn off palette fixes once we are no longer in the fading in or out states.
+	if (palette_fixes && super.palettefx.state != 1 && super.palettefx.state != 2)
+		palette_fixes = 0
+
+	// Annoyingly, the code that restores control to the character after transforming is here in the palette update.
+	// So it makes sense to do this custom handling here.
+	handleContinuedTransformation(state_temp == 1 && super.palettefx.state == 0xff)
+}
+
+function void UpdatePaletteEffects.SuperForm.blendSonicKnux(u32 source1, u32 source2, u16 blendFactor, bool underwater)
+{
+	// This is true if Sonic transforms from Super to Hyper or vice versa.
+	if (palette_fixes && (getMainCharacter() == CHARACTER_SONIC) && ((super.palettefx.state == 1 || super.palettefx.state == 2)))
+	{
+		// In this situation, source1 is the address of base Sonic's blue color.
+		// If we replace it with this value, it's now Super Sonic's base yellow color.
+		// This makes the fade in/out from Hyper form go between the Super and Hyper palettes instead of from base to Hyper.
+		source1 = 0x000039be
+	}
+	base.UpdatePaletteEffects.SuperForm.blendSonicKnux(source1, source2, blendFactor, underwater)
+}
+
+function u32 getEmptyBuffer(u32 len)
+{
+	// Find an empty buffer in shared memory.
+	// 0x820000 is almost certainly empty, but we'll verify it anyway.
+	u32 buffer_address = 0x820000
+	u8 i = 0
+	while (i < len)
+	{
+		i += 4
+		if (u32[buffer_address + i] != 0)
+		{
+			buffer_address += i
+			i = 0
+		}
+	}
+	return buffer_address
+}
+
+function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
+{
+	// If we're not applying palette fixes, or if we're not in the fading in or out states, don't do anything.
+	if (!palette_fixes || (super.palettefx.state != 1 && super.palettefx.state != 2))
+	{
+		base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+		return
+	}
+
+	if (palette_fixes == 1 && super.palettefx.state == 1)
+	{
+		// Normally when this fade-in starts, super.palettefx.frame is always 0. But if we transform from
+		// Super to Hyper, that isn't always true. So we need to set it to 0 at the start of the fade-in.
+		palette_fixes = 2
+		super.palettefx.frame = 0
+	}
+	
+	u32 buffer_address = getEmptyBuffer(0x80)
+	// The colors in the "source" address are the character's base colors with no super palette.
+	// Normally, this function blends the hyper colors with the base colors to create the fade-in/out effect.
+	// We need to blend the hyper colors with the super colors instead, since we're transitioning from hyper to super.
+	// To do this, we replace the colors at the "source" address with the super colors.
+	u8 character = getMainCharacter()
+	for (u8 underwater = 0; underwater < (level.water_present ? 2 : 1); ++underwater)
+	{
+		u32 offset = character * 0x40 + (underwater ? 0x300 : 0)
+		u32 source = nonfading_address.char + offset
+		u32 dest = fading_address.char + offset
+		copyMemory(buffer_address + underwater * 0x40, source, 0x40)
+		u8 line = getModdedPaletteLine(character, 0, underwater)
+		u16 numColors = System.loadExternalPaletteData(getCharacterPaletteKey(character), line, 0x800000, 0x20)
+		for (u8 i = 0; i < numColors; i++)
+		{
+			u32 rgba = u32[0x800000 + i * 4]
+			rgba = (rgba & 0xff000000) ? packColorExt(rgba) : 0
+			if (rgba != 0)
+				u16[source + i * 2] = rgba
+		}
+	}
+	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+	u32 offset = getMainCharacter() * 0x40
+	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
+	if (level.water_present)
+		copyMemory(0x802480 + offset, buffer_address + 0x40, 0x40)
+	zeroMemory(buffer_address, 0x80)
+}
+
+/////////////////////////////
 ///    SCREENFADE FIXES   ///
 /////////////////////////////
 
-// The start of SOZ-2 has a custom fade-in that also fades in the character's palette alongside the stage.
-// No other stage in the game works like this, and as a result, we need custom handling for it.
-
-global u16 offset_fade
+//# address-hook(0x003bb8) end(0x003be2)
+function void UpdatePaletteEffects()
+{
+	normal_palette_update = true
+	base.UpdatePaletteEffects()
+	normal_palette_update = false
+}
 
 //# address-hook(0x056324)
 function void fn056324()
@@ -833,59 +804,13 @@ function void fn056324()
 		return
 	}
 
-	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
-	copyMemory(buffer_address, 0x802000 + offset, 0x40)
-	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
-	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
-	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
-
-	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
-	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
-	updateSuperPaletteFixed()
-	for (u8 i = 0; i < 6; i += 2)
-		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
-	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
-	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
-
-	copyMemory(0x802000 + offset, buffer_address, 0x40)
-	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	setNonFadingPaletteToSuper(buffer_address, false)
 	base.fn056324()
-	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
-	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
-	zeroMemory(buffer_address, 0x8c)
-}
-
-//# address-hook(0x056366)
-function void fn056366()
-{
-	if (!always_super)
-	{
-		base.fn056366()
-		return
-	}
-
-	u32 buffer_address = getEmptyBuffer(0x8c)
-	u32 offset = getMainCharacter() * 0x40
-	copyMemory(buffer_address, 0x802000 + offset, 0x40)
-	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
-	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
-	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
-
-	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
-	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
-	updateSuperPaletteFixed()
-	for (u8 i = 0; i < 6; i += 2)
-		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
-	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
-	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
-
-	copyMemory(0x802000 + offset, buffer_address, 0x40)
-	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
-	base.fn056366()
-	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
-	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
-	zeroMemory(buffer_address, 0x8c)
+	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
+	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
+	zeroMemory(buffer_address, 0x46)
 }
 
 function void fadePaletteTowardsTargetUniform()
@@ -896,27 +821,13 @@ function void fadePaletteTowardsTargetUniform()
 		return
 	}
 
-	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
-	copyMemory(buffer_address, 0x802000 + offset, 0x40)
-	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
-	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
-	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
-
-	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
-	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
-	updateSuperPaletteRelative()
-	for (u8 i = 0; i < 6; i += 2)
-		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
-	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
-	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
-
-	copyMemory(0x802000 + offset, buffer_address, 0x40)
-	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	setNonFadingPaletteToSuper(buffer_address, true)
 	base.fadePaletteTowardsTargetUniform()
-	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
-	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
-	zeroMemory(buffer_address, 0x8c)
+	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
+	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
+	zeroMemory(buffer_address, 0x46)
 }
 
 function void fadePaletteToWhiteUniform()
@@ -927,52 +838,57 @@ function void fadePaletteToWhiteUniform()
 		return
 	}
 
-	u32 buffer_address = getEmptyBuffer(0x8c)
+	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
-	copyMemory(buffer_address, 0x802000 + offset, 0x40)
-	copyMemory(buffer_address + 0x40, 0x802180 + offset, 0x40)
-	copyMemory(buffer_address + 0x80, 0xfffffc04, 0x6)
-	copyMemory(buffer_address + 0x86, 0xfffffc84, 0x6)
-
-	copyMemory(0x802000 + offset, 0x802180 + offset, 0x40)
-	copyMemory(0xfffffc04, 0xfffffc84, 0x6)
-	updateSuperPaletteRelative()
-	for (u8 i = 0; i < 6; i += 2)
-		u16[0xfffffc04 + i] = makeNormalPackedColor(u16[0xfffffc04 + i])
-	copyMemory(0x802180 + offset, 0x802000 + offset, 0x40)
-	copyMemory(0xfffffc84, 0xfffffc04, 0x6)
-
-	copyMemory(0x802000 + offset, buffer_address, 0x40)
-	copyMemory(0xfffffc04, buffer_address + 0x80, 0x6)
+	setNonFadingPaletteToSuper(buffer_address, false)
 	base.fadePaletteToWhiteUniform()
-	copyMemory(0x802180 + offset, buffer_address + 0x40, 0x40)
-	copyMemory(0xfffffc84, buffer_address + 0x86, 0x6)
-	zeroMemory(buffer_address, 0x8c)
+	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
+	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
+	zeroMemory(buffer_address, 0x46)
 }
 
 // Helper function
-function void updateSuperPaletteFixed()
+function void setNonFadingPaletteToSuper(u32 buffer_address, bool relative_palette_update)
 {
 	u8 char = getMainCharacter()
-	if (char == CHARACTER_TAILS)
+	u32 offset = getMainCharacter() * 0x40
+
+	copyMemory(buffer_address + 0x40, nonfading_address.flicky, 0x6)
+	copyMemory(buffer_address, nonfading_address.char + offset, 0x40)
+	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
+	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
+	if (relative_palette_update)
 	{
-		super.palettefx.frame.tails = 0x06
-		super.palettefx.timer.tails = 0
+		super.palettefx.timer += 1
+		if (char == CHARACTER_TAILS)
+			super.palettefx.timer.tails += 1
 	}
-
-	super.palettefx.frame = 0x2a
-	super.palettefx.timer = 0
-
+	else
+	{
+		super.palettefx.frame = 0x2a
+		super.palettefx.timer = 0
+		if (char == CHARACTER_TAILS)
+		{
+			super.palettefx.frame.tails = 0x06
+			super.palettefx.timer.tails = 0
+		}
+	}
 	UpdatePaletteEffects.SuperForm()
+	for (u8 i = 0; i < 6; i += 2)
+		u16[fading_address.flicky + i] = makeNormalPackedColor(u16[fading_address.flicky + i])
+	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
+	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
 }
 
 // Helper function
-function void updateSuperPaletteRelative()
+function void swapMemory(u32 adr1, u32 adr2, u32 bytes)
 {
-	super.palettefx.timer += 1
-	if (getMainCharacter() == CHARACTER_TAILS)
-		super.palettefx.timer.tails += 1
-	UpdatePaletteEffects.SuperForm()
+	for (u32 i = 0; i < bytes; i += 4)
+	{
+		u32 temp = u32[adr1 + i]
+		u32[adr1 + i] = u32[adr2 + i]
+		u32[adr2 + i] = temp
+	}
 }
 
 // TODO, Always Super issues:

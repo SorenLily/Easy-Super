@@ -90,7 +90,7 @@
 				"InternalName": "doomsdayzoneform",
 				"DisplayName": "Doomsday Zone Form",
 				"Variable": "ddz_form",
-				"DefaultValue": "1",
+				"DefaultValue": "0",
 				"Options":
 				{
 					"0": "Default",
