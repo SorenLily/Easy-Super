@@ -7,6 +7,7 @@ global u8 progressive_forms
 global u8 super_ring_magnet
 global u8 ddz_form // 0 -> Super, 1 -> Hyper
 global u8 always_super // 0 -> Off, 1 -> Always Super, 2 -> Always Hyper
+global u16 hyper_flash_dimming
 
 // State for switching to the character's super palette at the start of a stage.
 global u8 initialize_palette
@@ -22,7 +23,9 @@ global u8 cutscene_speedcap
 global u8 adjust_flickies
 
 global bool normal_palette_update
-// Indicates the palette is fading towards white or towards black.
+
+define u16 char.black = u16[0xfffffc00]
+define u16 char.white = u16[0xfffffc02]
 
 constant u32 fading_address.flicky = 0xfffffc04
 constant u32 nonfading_address.flicky = 0xfffffc84
@@ -42,11 +45,15 @@ function u32 superAddress()
 
 function void Character.Initialization.shared(u8 character)
 {
-	initialize_palette = 0
-	palette_fixes = 0
-	continue_transformation = 0
-	cutscene_speedcap = 0
-	adjust_flickies = 0
+	if (A0 == 0xffffb000)
+	{
+		initialize_palette = 0
+		palette_fixes = 0
+		continue_transformation = 0
+		cutscene_speedcap = 0
+		adjust_flickies = 0
+		hyper_flash = 0
+	}
 	base.Character.Initialization.shared(character)
 	if (isMainCharacter(character) && always_super && !isSonicIntro() && global.zone != 0x0c && global.zone != 0x0d)
 	{
@@ -121,6 +128,7 @@ function void updateGameObjectLoop()
 	// At the start of a stage, there's a few frames where the general palette update code is not run.
 	// This means that even if the player is in the Super form, the Super Palette will not show during this window.
 	// So we have to force the super palette update.
+	
 	if (initialize_palette)
 	{
 		// This is true while a stage is fading in (before the player has control).
@@ -588,6 +596,30 @@ function void Character.UpdateNormalState.Knuckles()
 }
 
 /////////////////////////////
+///      HYPER FLASH      ///
+/////////////////////////////
+
+global bool hyper_flash
+
+function u16 VInt.getBlendFactorForScreenFlash()
+{
+	u16 result = base.VInt.getBlendFactorForScreenFlash()
+	if (hyper_flash && hyper_flash_dimming > 0)
+		result = result >> hyper_flash_dimming
+	if (global.whiteflash_timeout == 0)
+		hyper_flash = false
+	return result
+}
+
+//# address-hook(0x0193ca) end(0x0193e6)
+//# alias(fn0193ca) deprecated
+function void HyperSonicStars.CreateSparks()
+{
+	hyper_flash |= (objA0.state != 0)
+	base.HyperSonicStars.CreateSparks()
+}
+
+/////////////////////////////
 ///		AIZ CUTSCENE	  ///
 /////////////////////////////
 
@@ -605,6 +637,24 @@ function void fn061d92()
 		return
 	}
 	base.fn061d92()
+}
+
+//# address-hook(0x0679b8) end(0x067a06)
+function void fn0679b8()
+{
+	if (u8[superAddress()])
+		super.palettefx.timer++
+	if (always_super == 2)
+	{
+		base.fn0679b8()
+		u8[superAddress()] = 0xff
+		super.palettefx.timer++
+		UpdatePaletteEffects.SuperForm()
+	}
+	else
+	{
+		base.fn0679b8()
+	}
 }
 
 //# address-hook(0x067a08) end(0x067a1e)
@@ -636,7 +686,7 @@ function void fn067704()
 	// 0x13d0 is the normal x-position trigger for knuckles punching you. Slightly before that, we'll do our thing.
 	if (always_super && u16[0xffffb010] >= 0x13b0)
 	{
-		// Instead, skip straight to the end of the cutscene and continue as Super Sonic.
+		// Don't call the base; skip straight to the end of the cutscene and continue as Super Sonic.
 		// This object will get unloaded by the end of this call, so changing objA0.* values is fine.
 		objA0.render_flags &= ~render_flag.VISIBLE
 		// These are the the numbers that normally go into fn0851e4(), which gets called by fn061f10().
@@ -660,6 +710,22 @@ function void fn067704()
 	base.fn067704()
 }
 
+function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s16 py, bool asSmallGhost)
+{
+	bool result
+	if (isSonicIntro() && always_super == 2 && u8[superAddress()] == 0xff && variant == 0)
+	{
+		u8[superAddress()] = 1
+		result = base.Standalone.drawCharacterSprite(character, variant, px, py, asSmallGhost)
+		u8[superAddress()] = 0xff
+	}
+	else
+	{
+		result = base.Standalone.drawCharacterSprite(character, variant, px, py, asSmallGhost)
+	}
+	return result
+}
+
 /////////////////////////////
 ///		PALETTE FIXES	  ///
 /////////////////////////////
@@ -667,11 +733,40 @@ function void fn067704()
 // We have to apply multiple tweaks in order to make the character correctly shift colors when transforming from
 // Super to Hyper or vice versa.
 
+// Helper function
+function void swapMemory(u32 adr1, u32 adr2, u32 bytes)
+{
+	for (u32 i = 0; i < bytes; i += 4)
+	{
+		u32 temp = u32[adr1 + i]
+		u32[adr1 + i] = u32[adr2 + i]
+		u32[adr2 + i] = temp
+	}
+}
+
+function u32 getEmptyBuffer(u32 len)
+{
+	// Find an empty buffer in shared memory.
+	// 0x820000 is almost certainly empty, but we'll verify it anyway.
+	u32 buffer_address = 0x820000
+	u8 i = 0
+	while (i < len)
+	{
+		i += 4
+		if (u32[buffer_address + i] != 0)
+		{
+			buffer_address += i
+			i = 0
+		}
+	}
+	return buffer_address
+}
+
 //# address-hook(0x003750) end(0x00398c)
 function void UpdatePaletteEffects.SuperForm()
 {
 	u8 state_temp = super.palettefx.state
-	if (normal_palette_update && (u16[0xfffffc00] != 0 || u16[0xfffffc02] != 0x0eee))
+	if (normal_palette_update && (char.black != 0 || char.white != 0x0eee))
 	{
 		u32 buffer_address = getEmptyBuffer(0x46)
 		u32 offset = getMainCharacter() * 0x40
@@ -716,24 +811,6 @@ function void UpdatePaletteEffects.SuperForm.blendSonicKnux(u32 source1, u32 sou
 		source1 = 0x000039be
 	}
 	base.UpdatePaletteEffects.SuperForm.blendSonicKnux(source1, source2, blendFactor, underwater)
-}
-
-function u32 getEmptyBuffer(u32 len)
-{
-	// Find an empty buffer in shared memory.
-	// 0x820000 is almost certainly empty, but we'll verify it anyway.
-	u32 buffer_address = 0x820000
-	u8 i = 0
-	while (i < len)
-	{
-		i += 4
-		if (u32[buffer_address + i] != 0)
-		{
-			buffer_address += i
-			i = 0
-		}
-	}
-	return buffer_address
 }
 
 function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
@@ -795,19 +872,18 @@ function void UpdatePaletteEffects()
 	normal_palette_update = false
 }
 
-//# address-hook(0x056324)
-function void fn056324()
+//# address-hook(0x003b14) end(0x003b52)
+function void FadeInPalette()
 {
-	if (!always_super)
+	if (!always_super || char.white == 0x0eee)
 	{
-		base.fn056324()
+		base.FadeInPalette()
 		return
 	}
-
 	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
-	setNonFadingPaletteToSuper(buffer_address, false)
-	base.fn056324()
+	setNonFadingPaletteToSuper(buffer_address)
+	base.FadeInPalette()
 	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
 	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
 	zeroMemory(buffer_address, 0x46)
@@ -823,32 +899,15 @@ function void fadePaletteTowardsTargetUniform()
 
 	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
-	setNonFadingPaletteToSuper(buffer_address, true)
+	setNonFadingPaletteToSuper(buffer_address)
 	base.fadePaletteTowardsTargetUniform()
 	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
 	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
 	zeroMemory(buffer_address, 0x46)
 }
 
-function void fadePaletteToWhiteUniform()
-{
-	if (!always_super)
-	{
-		base.fadePaletteToWhiteUniform()
-		return
-	}
-
-	u32 buffer_address = getEmptyBuffer(0x46)
-	u32 offset = getMainCharacter() * 0x40
-	setNonFadingPaletteToSuper(buffer_address, false)
-	base.fadePaletteToWhiteUniform()
-	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
-	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
-	zeroMemory(buffer_address, 0x46)
-}
-
 // Helper function
-function void setNonFadingPaletteToSuper(u32 buffer_address, bool relative_palette_update)
+function void setNonFadingPaletteToSuper(u32 buffer_address)
 {
 	u8 char = getMainCharacter()
 	u32 offset = getMainCharacter() * 0x40
@@ -857,38 +916,20 @@ function void setNonFadingPaletteToSuper(u32 buffer_address, bool relative_palet
 	copyMemory(buffer_address, nonfading_address.char + offset, 0x40)
 	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
-	if (relative_palette_update)
+
+	super.palettefx.frame = 0x2a
+	super.palettefx.timer = 0
+	if (char == CHARACTER_TAILS)
 	{
-		super.palettefx.timer += 1
-		if (char == CHARACTER_TAILS)
-			super.palettefx.timer.tails += 1
-	}
-	else
-	{
-		super.palettefx.frame = 0x2a
-		super.palettefx.timer = 0
-		if (char == CHARACTER_TAILS)
-		{
-			super.palettefx.frame.tails = 0x06
-			super.palettefx.timer.tails = 0
-		}
+		super.palettefx.frame.tails = 0x06
+		super.palettefx.timer.tails = 0
 	}
 	UpdatePaletteEffects.SuperForm()
 	for (u8 i = 0; i < 6; i += 2)
 		u16[fading_address.flicky + i] = makeNormalPackedColor(u16[fading_address.flicky + i])
+		
 	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
-}
-
-// Helper function
-function void swapMemory(u32 adr1, u32 adr2, u32 bytes)
-{
-	for (u32 i = 0; i < bytes; i += 4)
-	{
-		u32 temp = u32[adr1 + i]
-		u32[adr1 + i] = u32[adr2 + i]
-		u32[adr2 + i] = temp
-	}
 }
 
 // TODO, Always Super issues:

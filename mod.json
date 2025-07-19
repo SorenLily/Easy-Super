@@ -5,7 +5,7 @@
 		"UniqueID": "soren-lily-easy-super",
 		"Author": "Soren Lily",
 		"Description": "- Progessive Super/Hyper forms.\n- Customizable ring drain and ring requirements for Super/Hyper forms.\n- Set Super/Hyper as your base form.\n And more!",
-		"ModVersion": "0.9.8",
+		"ModVersion": "0.9.10",
 		"GameVersion": "20.07.18.0"
 	},
 	"Settings":
@@ -107,6 +107,19 @@
 					"0": "Off",
 					"1": "On (Super)",
 					"2": "On (Hyper)"
+				}
+			},
+			{
+				"InternalName": "hyperflashbrightness",
+				"DisplayName": "Hyper Flash Brightness",
+				"Variable": "hyper_flash_dimming",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0x0": "Full",
+					"0x1": "Half",
+					"0x2": "Quarter",
+					"0xf": "Zero"
 				}
 			}
 		]
