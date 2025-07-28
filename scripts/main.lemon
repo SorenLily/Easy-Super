@@ -22,15 +22,15 @@ global u8 cutscene_speedcap
 // Counter for adjusting the positions of the super flickies on initialization.
 global u8 adjust_flickies
 
-global bool normal_palette_update
-
+// These two addresses hold reference colors that we can use to check if the character palette is currently fading in from black or white.
 define u16 char.black = u16[0xfffffc00]
 define u16 char.white = u16[0xfffffc02]
 
-constant u32 fading_address.flicky = 0xfffffc04
-constant u32 nonfading_address.flicky = 0xfffffc84
+// These are the base addresses of palette colors that we need to manipulate in some places.
 constant u32 fading_address.char = 0x802000
 constant u32 nonfading_address.char = 0x802180
+constant u32 fading_address.flicky = 0xfffffc04
+constant u32 nonfading_address.flicky = 0xfffffc84
 
 // Helper function
 function u32 superAddress()
@@ -45,6 +45,7 @@ function u32 superAddress()
 
 function void Character.Initialization.shared(u8 character)
 {
+	// Reset global variables, but only once, otherwise "initialize_palette" doesn't work correctly.
 	if (A0 == 0xffffb000)
 	{
 		initialize_palette = 0
@@ -64,6 +65,7 @@ function void Character.Initialization.shared(u8 character)
 // Helper function
 function void initSuperForm(u8 character)
 {
+	// Initialize the charcter to super/hyper form on initialization.
 	u32 a0_temp = A0
 	A0 = 0xffffb000
 	u32 speedcap_address = 0xfffff760
@@ -179,7 +181,7 @@ function void Character.UpdateRingsInSuperForm()
 		return
 	}
 
-	bool change_timer = super.ring_dec.frames == 0
+	bool change_timer = (super.ring_dec.frames == 0)
 	base.Character.UpdateRingsInSuperForm()
 
 	// When a ring is consumed and the timer is reset to 60, change it to our setting.
@@ -351,7 +353,8 @@ function void Character.updateJumpMoves()
 // Helper function
 function void handleContinuedTransformation(bool fade_out_finished)
 {
-	// This function manages the state for transforming to Super and then holding Y to continue to transform to Hyper.
+	// This function is called from UpdatePaletteEffects.SuperForm().
+	// It manages the state for transforming to Super and then holding Y to continue to transform to Hyper.
 	// This mostly involves managing continue_transformation, but also the character's control_flags.
 
 	// The player must hold Y to continue the transformation all the way to Hyper.
@@ -393,23 +396,6 @@ function void handleContinuedTransformation(bool fade_out_finished)
 			// Sonic gets to transform to Hyper on the next frame.
 			continue_transformation = 12
 		}
-	}
-}
-
-//# address-hook(0x08167c) end(0x0816ee)
-function void fn08167c()
-{
-	if (ddz_form == 1)
-	{
-		// Force the Super form instead of the Hyper form.
-		u8 super_emeralds_temp = global.super_emeralds
-		global.super_emeralds = 0
-		base.fn08167c()
-		global.super_emeralds = super_emeralds_temp
-	}
-	else
-	{
-		base.fn08167c()
 	}
 }
 
@@ -528,6 +514,27 @@ function void DynamicRing.Update()
 }
 
 /////////////////////////////
+///	   	   DDZ FORM 	  ///
+/////////////////////////////
+
+//# address-hook(0x08167c) end(0x0816ee)
+function void fn08167c()
+{
+	if (ddz_form == 1)
+	{
+		// Force the Super form instead of the Hyper form.
+		u8 super_emeralds_temp = global.super_emeralds
+		global.super_emeralds = 0
+		base.fn08167c()
+		global.super_emeralds = super_emeralds_temp
+	}
+	else
+	{
+		base.fn08167c()
+	}
+}
+
+/////////////////////////////
 ///	  CUTSCENE HANDLING	  ///
 /////////////////////////////
 
@@ -599,10 +606,12 @@ function void Character.UpdateNormalState.Knuckles()
 ///      HYPER FLASH      ///
 /////////////////////////////
 
+// If true, a hyper flash is active.
 global bool hyper_flash
 
 function u16 VInt.getBlendFactorForScreenFlash()
 {
+	// Reduce the blend factor to dim the screen flash.
 	u16 result = base.VInt.getBlendFactorForScreenFlash()
 	if (hyper_flash && hyper_flash_dimming > 0)
 		result = result >> hyper_flash_dimming
@@ -623,13 +632,13 @@ function void HyperSonicStars.CreateSparks()
 ///		AIZ CUTSCENE	  ///
 /////////////////////////////
 
+// Timer used for slowing Sonic down in the cutscene.
 global u8 slowdown_timer
 
 //# address-hook(0x061d92) end(0x061daa)
 function void fn061d92()
 {
 	// This is Cutscene Knuckles' update function.
-	
 	if (always_super)
 	{
 		// Make him never show up.
@@ -642,11 +651,17 @@ function void fn061d92()
 //# address-hook(0x0679b8) end(0x067a06)
 function void fn0679b8()
 {
+	// This function updates the Super Palette in the cutscene. But UpdatePaletteEffects() is still running during this,
+	// so the super palette update gets called twice per frame, causing the flashing effect to happen twice as fast as normal.
+	// I don't know if this is intentional, but it's odd and causes problems for Always Hyper, so we'll fix it by incrementing
+	// super.palettefx.timer before calling the base.
 	if (u8[superAddress()])
 		super.palettefx.timer++
+
 	if (always_super == 2)
 	{
 		base.fn0679b8()
+		// Run the palette update again (without progressing the timer), but in Hyper form.
 		u8[superAddress()] = 0xff
 		super.palettefx.timer++
 		UpdatePaletteEffects.SuperForm()
@@ -712,6 +727,8 @@ function void fn067704()
 
 function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s16 py, bool asSmallGhost)
 {
+	// The point of this hook is to disable the after-images in the Sonic Intro while the character is in hyper form.
+	// TODO: Move the after-images so they're positioned correctly during the cutscene instead of removing them.
 	bool result
 	if (isSonicIntro() && always_super == 2 && u8[superAddress()] == 0xff && variant == 0)
 	{
@@ -730,20 +747,13 @@ function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s
 ///		PALETTE FIXES	  ///
 /////////////////////////////
 
+// Flag for when UpdatePaletteEffects.SuperForm() is called from its normal path or not.
+global bool normal_palette_update
+
 // We have to apply multiple tweaks in order to make the character correctly shift colors when transforming from
 // Super to Hyper or vice versa.
 
 // Helper function
-function void swapMemory(u32 adr1, u32 adr2, u32 bytes)
-{
-	for (u32 i = 0; i < bytes; i += 4)
-	{
-		u32 temp = u32[adr1 + i]
-		u32[adr1 + i] = u32[adr2 + i]
-		u32[adr2 + i] = temp
-	}
-}
-
 function u32 getEmptyBuffer(u32 len)
 {
 	// Find an empty buffer in shared memory.
@@ -765,17 +775,14 @@ function u32 getEmptyBuffer(u32 len)
 //# address-hook(0x003750) end(0x00398c)
 function void UpdatePaletteEffects.SuperForm()
 {
+	// If this function was called from UpdatePaletteEffects() and the character palette is fading in or out...
+	// TODO: This check is not perfect. There are a couple screenfades where it keeps applying a few frames after char.black/white
+	// are back to these values.
 	u8 state_temp = super.palettefx.state
 	if (normal_palette_update && (char.black != 0 || char.white != 0x0eee))
 	{
-		u32 buffer_address = getEmptyBuffer(0x46)
-		u32 offset = getMainCharacter() * 0x40
-		copyMemory(buffer_address, fading_address.char + offset, 0x40)
-		copyMemory(buffer_address + 0x40, fading_address.flicky, 0x6)
-		base.UpdatePaletteEffects.SuperForm()
-		copyMemory(fading_address.char + offset, buffer_address, 0x40)
-		copyMemory(fading_address.flicky, buffer_address + 0x40, 0x6)
-		zeroMemory(buffer_address, 0x46)
+		// Do not run the function here. It will be called elsewhere if needed, with special handling.
+		return
 	}
 	else
 	{
@@ -838,12 +845,15 @@ function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
 	u8 character = getMainCharacter()
 	for (u8 underwater = 0; underwater < (level.water_present ? 2 : 1); ++underwater)
 	{
+		// This is loosely copied from the base function.
 		u32 offset = character * 0x40 + (underwater ? 0x300 : 0)
 		u32 source = nonfading_address.char + offset
-		u32 dest = fading_address.char + offset
+		// Copy the palette so it can be restored later.
 		copyMemory(buffer_address + underwater * 0x40, source, 0x40)
+		// Load the modded palette.
 		u8 line = getModdedPaletteLine(character, 0, underwater)
 		u16 numColors = System.loadExternalPaletteData(getCharacterPaletteKey(character), line, 0x800000, 0x20)
+		// Loop through the modded palette and copy it into the source address.
 		for (u8 i = 0; i < numColors; i++)
 		{
 			u32 rgba = u32[0x800000 + i * 4]
@@ -853,16 +863,35 @@ function void UpdatePaletteEffects.SuperForm.moddingVersion(u8 characterVersion)
 		}
 	}
 	base.UpdatePaletteEffects.SuperForm.moddingVersion(characterVersion)
+	// Restore the non-fading palette.
 	u32 offset = getMainCharacter() * 0x40
 	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
 	if (level.water_present)
 		copyMemory(0x802480 + offset, buffer_address + 0x40, 0x40)
+	// Clear the buffer.
 	zeroMemory(buffer_address, 0x80)
 }
 
 /////////////////////////////
 ///    SCREENFADE FIXES   ///
 /////////////////////////////
+
+// Some screenfades need special handling, particularly the ones where the character fades back to their normal palette
+// from black/white. The way this is normally handled is there is a copy of the character's palette that never has
+// screenfading applied, and the game just incrementally modifies the faded palette colors until they match the non-fading
+// colors. The problem is the non-fading colors are always base form colors, and never Super form colors. So when our
+// base form is Super/Hyper, we have to replace the non-faded colors with Super/Hyper colors to make the screenfade work.
+
+// Helper function
+function void swapMemory(u32 adr1, u32 adr2, u32 bytes)
+{
+	for (u32 i = 0; i < bytes; i += 4)
+	{
+		u32 temp = u32[adr1 + i]
+		u32[adr1 + i] = u32[adr2 + i]
+		u32[adr2 + i] = temp
+	}
+}
 
 //# address-hook(0x003bb8) end(0x003be2)
 function void UpdatePaletteEffects()
@@ -875,22 +904,29 @@ function void UpdatePaletteEffects()
 //# address-hook(0x003b14) end(0x003b52)
 function void FadeInPalette()
 {
+	// This function fades colors from black toward the non-fading reference color.
+	// If our base form is not Super/Hyper or the palette is fully faded in, do nothing.
 	if (!always_super || char.white == 0x0eee)
 	{
 		base.FadeInPalette()
 		return
 	}
+	
 	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
+	// Replace the non-fading colors with Super/Hyper colors.
 	setNonFadingPaletteToSuper(buffer_address)
 	base.FadeInPalette()
+	// Restore non-fading palette.
 	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
 	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
+	// Clear the buffer.
 	zeroMemory(buffer_address, 0x46)
 }
 
 function void fadePaletteTowardsTargetUniform()
 {
+	// This function fades colors from white toward the non-fading reference color.
 	if (!always_super)
 	{
 		base.fadePaletteTowardsTargetUniform()
@@ -899,24 +935,32 @@ function void fadePaletteTowardsTargetUniform()
 
 	u32 buffer_address = getEmptyBuffer(0x46)
 	u32 offset = getMainCharacter() * 0x40
+	// Replace the non-fading colors with Super/Hyper colors.
 	setNonFadingPaletteToSuper(buffer_address)
 	base.fadePaletteTowardsTargetUniform()
+	// Restore non-fading palette.
 	copyMemory(nonfading_address.char + offset, buffer_address, 0x40)
 	copyMemory(nonfading_address.flicky, buffer_address + 0x40, 6)
+	// Clear the buffer.
 	zeroMemory(buffer_address, 0x46)
 }
 
 // Helper function
 function void setNonFadingPaletteToSuper(u32 buffer_address)
 {
+	// What we want to do in this function is run UpdatePaletteEffects.SuperForm() on the non-fading palette colors.
+	// But there is no way to actually do that within the palette update itself. So we'll do some trickery instead.
 	u8 char = getMainCharacter()
 	u32 offset = getMainCharacter() * 0x40
 
+	// Copy the character palette to the buffer, then swap the fading and non-fading palettes.
 	copyMemory(buffer_address + 0x40, nonfading_address.flicky, 0x6)
 	copyMemory(buffer_address, nonfading_address.char + offset, 0x40)
 	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
-
+	// Unfortunately, screenfades are handled incrementally, so it would be extremely difficult to support
+	// a palette that changes during the screenfade. So, just keep it at a fixed state.
+	// TODO: is this always the best choice to set the palette at?
 	super.palettefx.frame = 0x2a
 	super.palettefx.timer = 0
 	if (char == CHARACTER_TAILS)
@@ -924,10 +968,12 @@ function void setNonFadingPaletteToSuper(u32 buffer_address)
 		super.palettefx.frame.tails = 0x06
 		super.palettefx.timer.tails = 0
 	}
+	// Running this will set the fading palette to the super colors.
 	UpdatePaletteEffects.SuperForm()
 	for (u8 i = 0; i < 6; i += 2)
 		u16[fading_address.flicky + i] = makeNormalPackedColor(u16[fading_address.flicky + i])
-		
+	// Now swap the fading and non-fading palettes again.
+	// This restores the fading palette to its original state, but the non-fading palette now contains the super colors.
 	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
 }
@@ -935,5 +981,4 @@ function void setNonFadingPaletteToSuper(u32 buffer_address)
 // TODO, Always Super issues:
 // - Sonic has the wrong palette for 1 frame when Always Super is active and the fn067704() hook runs.
 // - Super Sonic floats a little too low and doesn't respect terrain. Nudge him up a bit before restoring control with Always Super.
-// - In the white screenfades in LRZ-3 and DDZ, the fading uses base palette instead of super palette, causing visual issues.
 // - Make Knuckles start in base form in his intro, then jump and transform to super before the cutscene ends.
