@@ -202,12 +202,21 @@ function bool Character.performSuperTransformation()
 	u8 ring_req_super = 100 - ring_req_super.setting
 	u8 ring_req_hyper = 100 - ring_req_hyper.setting
 	u8 target_form = 0
+	// Are we going to Super form (1) or Hyper form (2)?
 	if (global.super_emeralds >= 7)
 	{
 		if ((!progressive_forms && !u8[superAddress()]) || (super_to_hyper))
+		{
 			target_form = 2
+		}
 		else if (progressive_forms && u8[superAddress()] == 0)
-			target_form = 1
+		{
+			// Need a special case to respect the Hyper Tails setting.
+			if (char.character == CHARACTER_TAILS && !Game.getSetting(SETTING_HYPER_TAILS))
+				target_form = 2
+			else
+				target_form = 1
+		}		
 	}
 	else if (global.chaos_emeralds >= 7 && global.traded_emeralds == 0 && !u8[superAddress()])
 	{
@@ -215,10 +224,9 @@ function bool Character.performSuperTransformation()
 	}
 	else
 	{
-		// We don't meet the requirements to go to any super form, so exit.
+		// We don't meet the requirements to transform to either form, so exit.
 		return base.Character.performSuperTransformation()
 	}
-
 	// Enforce ring requirement settings.
 	if (target_form == 1 && (ring_counter >= ring_req_super))
 		ring_counter = 50
@@ -226,7 +234,7 @@ function bool Character.performSuperTransformation()
 		ring_counter = 50
 	else
 	{
-		// We do not have enough rings to go super/hyper.
+		// We do not have enough rings to go super/hyper; prevent the transformation and exit.
 		ring_counter = 0
 		result = base.Character.performSuperTransformation()
 		ring_counter = rings_temp
@@ -258,7 +266,7 @@ function bool Character.performSuperTransformation()
 
 	result = base.Character.performSuperTransformation()
 
-	if (result) // Need to initialize the ring drain timer to our setting.
+	if (result) // Initialize the ring drain timer to our setting.
 		super.ring_dec.frames = (u8[superAddress()] == 1) ? ring_drain_super : ring_drain_hyper
 
 	// Reset variables.
@@ -277,9 +285,9 @@ function void Character.cancelSuperTransformation()
 		// If we're in Hyper form and Hyper is not our base form...
 		if ((u8[superAddress()] & 0x80) && always_super != 2)
 		{
-			// Need to go from Hyper form to Super form.
-			// The base function does a lot of things that we don't want in this situation, and technically we never stop being Super here.
-			// So it's better to just do the things we need manually and not call the base.
+			// Here we go from Hyper form to Super form.
+			// The base function does a lot of things that we don't want in this situation, and technically we never stop
+			// being Super here. So it's better to just do the things we need manually and not call the base.
 			u8[superAddress()] = 1
 			// This is the "fade out" palette state.
 			super.palettefx.state = 2
@@ -315,6 +323,7 @@ function void Character.updateJumpMoves()
 		// We're already Super, so set this flag to enable going Hyper.
 		super_to_hyper = true
 		bool result = Character.performSuperTransformation()
+		super_to_hyper = false
 		// Rewind the Transforming animation a bit to make it last longer.
 		char.animation.frame = 0x5
 		continue_transformation = 0
@@ -332,11 +341,17 @@ function void Character.updateJumpMoves()
 			return
 		}
 	}
-
-	// If the "Go Super then Hyper" setting is on and we're in Super form and we're eligible to go Hyper and we have the correct state and button pressed...
-	if (progressive_forms && super_temp == 1 && global.super_emeralds >= 7 && char.jumping && char.double_jump_state == 0 && Input.buttonPressed(BUTTON_Y) && char.invuln.countdown == 0)
+	// We can transform again from super to to hyper if...
+	bool transform_again = true
+	// we are in super form and eligible to go hyper...
+	transform_again &= (progressive_forms && super_temp == 1 && global.super_emeralds >= 7)
+	// and we will we pass the conditions in the base function needed to reach Character.performSuperTransformation()...
+	transform_again &= (char.jumping && char.double_jump_state == 0 && Input.buttonPressed(BUTTON_Y) && char.invuln.countdown == 0)
+	// and we are not still in the transforming state (transforming while still in this state causes bugs).
+	transform_again &= (char.state != ((char.character == CHARACTER_TAILS) ? char.state.TAILS_TRANSFORM : char.state.TRANSFORMING))
+	if (transform_again)
 	{
-		// Super state has to be modified here so that Character.performSuperTransformation() gets reached.
+		// super state has to be modified here so that Character.performSuperTransformation() gets reached.
 		u8[superAddress()] = 0
 		super_to_hyper = true
 	}
@@ -496,17 +511,17 @@ function void SonicUpdateRingCollection()
 function void DynamicRing.Update()
 {
 	// This function is called from the ring object, not the character, so we have to use direct addresses.
-	u8 super.active.local = (u8[0xffffb038] == 1) ? u8[0xfffff667] : u8[0xfffffe19]
+	u8 super_state = (u8[0xffffb038] == 1) ? u8[0xfffff667] : u8[0xfffffe19]
 
 	u8 bonus_effect_temp = u8[0xffffb02b]
 	// If we're super and the ring magnet setting is on...
-	if (super.active.local && super_ring_magnet)
+	if (super_state && super_ring_magnet)
 	{
 		// Apply Lightning shield to attract rings.
 		u8[0xffffb02b] |= char.bonus.SHIELD_LIGHTNING
 	}
 	base.DynamicRing.Update()
-	if (super.active.local && super_ring_magnet)
+	if (super_state && super_ring_magnet)
 	{
 		// Reset bonus.
 		u8[0xffffb02b] = bonus_effect_temp
@@ -952,12 +967,11 @@ function void setNonFadingPaletteToSuper(u32 buffer_address)
 	// But there is no way to actually do that within the palette update itself. So we'll do some trickery instead.
 	u8 char = getMainCharacter()
 	u32 offset = getMainCharacter() * 0x40
-
 	// Copy the character palette to the buffer, then swap the fading and non-fading palettes.
-	copyMemory(buffer_address + 0x40, nonfading_address.flicky, 0x6)
 	copyMemory(buffer_address, nonfading_address.char + offset, 0x40)
-	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
+	copyMemory(buffer_address + 0x40, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
+	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	// Unfortunately, screenfades are handled incrementally, so it would be extremely difficult to support
 	// a palette that changes during the screenfade. So, just keep it at a fixed state.
 	// TODO: is this always the best choice to set the palette at?
@@ -969,13 +983,14 @@ function void setNonFadingPaletteToSuper(u32 buffer_address)
 		super.palettefx.timer.tails = 0
 	}
 	// Running this will set the fading palette to the super colors.
+	// We have to set the super colors through this function because we do not know the color layout of modded palettes.
 	UpdatePaletteEffects.SuperForm()
 	for (u8 i = 0; i < 6; i += 2)
 		u16[fading_address.flicky + i] = makeNormalPackedColor(u16[fading_address.flicky + i])
 	// Now swap the fading and non-fading palettes again.
 	// This restores the fading palette to its original state, but the non-fading palette now contains the super colors.
-	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 	swapMemory(fading_address.char + offset, nonfading_address.char + offset, 0x40)
+	swapMemory(fading_address.flicky, nonfading_address.flicky, 0x6)
 }
 
 // TODO, Always Super issues:
