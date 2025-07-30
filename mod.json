@@ -1,0 +1,136 @@
+{
+	"Metadata":
+	{
+		"Name": "Easy Super",
+		"UniqueID": "soren-lily-easy-super",
+		"Author": "Soren Lily",
+		"Description": "- Progessive Super/Hyper forms.\n- Customizable ring drain and ring requirements for Super/Hyper forms.\n- Set Super/Hyper as your base form.\n And more!",
+		"ModVersion": "1.1.0",
+		"GameVersion": "20.07.18.0"
+	},
+	"Settings":
+	{
+		"List":
+		[
+			{
+				"InternalName": "gosuperthenhyper",
+				"DisplayName": "Go Super Then Hyper",
+				"Category": "Main Settings",
+				"Variable": "progressive_forms",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "ringrequirementsuper",
+				"DisplayName": "Ring Requirement (Super)",
+				"Category": "Main Settings",
+				"Variable": "ring_req_super.setting",
+				"DefaultValue": "0x32",
+				"Options":
+				{
+					"0x00": "100",
+					"0x32": "50",
+					"0x4b": "25",
+					"0x64": "0"
+				}
+			},
+			{
+				"InternalName": "ringdrainsuper",
+				"DisplayName": "Ring Drain (Super)",
+				"Category": "Main Settings",
+				"Variable": "ring_drain_super",
+				"DefaultValue": "0x3c",
+				"Options":
+				{
+					"0x1e": "Double",
+					"0x3c": "Normal",
+					"0x78": "Half",
+					"0xf0": "None"
+				}
+			},
+			{
+				"InternalName": "ringrequirementhyper",
+				"DisplayName": "Ring Requirement (Hyper)",
+				"Category": "Main Settings",
+				"Variable": "ring_req_hyper.setting",
+				"DefaultValue": "0x32",
+				"Options":
+				{
+					"0x00": "100",
+					"0x32": "50",
+					"0x4b": "25",
+					"0x64": "0"
+				}
+			},
+			{
+				"InternalName": "ringdrainhyper",
+				"DisplayName": "Ring Drain (Hyper)",
+				"Category": "Main Settings",
+				"Variable": "ring_drain_hyper",
+				"DefaultValue": "0x3c",
+				"Options":
+				{
+					"0x1e": "Double",
+					"0x3c": "Normal",
+					"0x78": "Half",
+					"0xf0": "None"
+				}
+			},
+			{
+				"InternalName": "superformringmagnet",
+				"DisplayName": "Super Form Ring Magnet",
+				"Category": "Extras",
+				"Variable": "super_ring_magnet",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "baseformissuper",
+				"DisplayName": "Base Form is Super",
+				"Category": "Main Settings",
+				"Variable": "always_super",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0": "Off",
+					"1": "On (Super)",
+					"2": "On (Hyper)"
+				}
+			},
+			{
+				"InternalName": "hyperflashbrightness",
+				"DisplayName": "Hyper Flash Brightness",
+				"Category": "Extras",
+				"Variable": "hyper_flash_dimming",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0x0": "Full",
+					"0x1": "Half",
+					"0x2": "Quarter",
+					"0xf": "Zero"
+				}
+			},
+			{
+				"InternalName": "doomsdayzoneform",
+				"DisplayName": "Doomsday Zone Form",
+				"Category": "Extras",
+				"Variable": "ddz_form",
+				"DefaultValue": "0",
+				"Options":
+				{
+					"0": "Default",
+					"1": "Super Only"
+				}
+			}
+		]
+	}
+}
